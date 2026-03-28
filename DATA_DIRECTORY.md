@@ -1,6 +1,8 @@
 # Data 目录说明
 
-`data/` 目录用于存储 GoProxy 的所有运行时数据和配置。
+GoProxy 的所有运行时数据和配置存储在数据目录中。
+
+**默认配置**（`docker-compose.yml`）：使用 Docker Named Volume `goproxy-data`，由 Docker 自动管理，数据持久化且独立于容器生命周期。
 
 ## 📁 目录内容
 
@@ -49,9 +51,100 @@
 
 > 💡 **注意**：`config.json` 是运行时生成的，首次启动时不存在，使用默认配置。通过 WebUI 修改配置后会自动保存到此文件。
 
-## 🐳 Docker 挂载
+## 📍 数据位置
 
-### 为什么需要挂载 data 目录？
+### Dokploy / 生产部署（Named Volume）
+
+**卷名称**：`goproxy-data`
+
+**实际位置**（Linux）：
+```bash
+/var/lib/docker/volumes/goproxy-data/_data/
+```
+
+**查看数据**：
+```bash
+# 进入运行中的容器
+docker exec -it proxygo sh
+
+# 查看数据目录
+ls -lh /app/data/
+
+# 查看数据库
+sqlite3 /app/data/proxy.db "SELECT COUNT(*) FROM proxies;"
+```
+
+**备份数据**：
+```bash
+# 手动导出卷
+docker run --rm -v goproxy-data:/data -v $(pwd):/backup \
+  alpine tar czf /backup/goproxy-backup-$(date +%Y%m%d).tar.gz -C /data .
+```
+
+**恢复数据**：
+```bash
+# 停止服务
+docker compose down
+
+# 恢复备份
+docker run --rm -v goproxy-data:/data -v $(pwd):/backup \
+  alpine sh -c "cd /data && tar xzf /backup/goproxy-backup-20260328.tar.gz"
+
+# 重启服务
+docker compose up -d
+```
+
+### 本地开发（相对路径挂载）
+
+如果使用 `docker run -v "$(pwd)/data:/app/data"`，数据会保存在项目目录的 `./data` 文件夹中。
+
+**查看数据**：
+```bash
+# 直接查看宿主机目录
+ls -lh data/
+
+# 查看数据库
+sqlite3 data/proxy.db "SELECT COUNT(*) FROM proxies;"
+```
+
+**备份数据**：
+```bash
+# 简单打包
+tar czf goproxy-backup-$(date +%Y%m%d).tar.gz data/
+
+# 或仅备份数据库
+cp data/proxy.db backups/proxy-$(date +%Y%m%d).db
+```
+
+## 🐳 Docker 挂载配置
+
+### 使用 Named Volume（推荐）
+
+在 `docker-compose.yml` 中：
+
+```yaml
+volumes:
+  - goproxy-data:/app/data  # Named Volume
+
+volumes:
+  goproxy-data:              # 定义卷
+```
+
+**优势**：
+- ✅ 数据持久化，容器删除不丢失
+- ✅ Docker 自动管理，无需关心具体路径
+- ✅ 支持备份和迁移
+- ✅ 适合生产环境和自动化部署
+
+### 使用本地目录（本地开发）
+
+在 `docker run` 中：
+
+```bash
+docker run -v "$(pwd)/data:/app/data" ...
+```
+
+### 为什么需要持久化？
 
 **持久化数据**：
 - 容器重启/更新后代理池数据不丢失

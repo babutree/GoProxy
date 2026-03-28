@@ -16,7 +16,7 @@ services:
       - "${PROXY_HOST:-127.0.0.1}:${RANDOM_PORT:-7777}:7777"   # 随机轮换
       - "${WEBUI_HOST:-0.0.0.0}:${WEBUI_PORT:-7778}:7778"      # WebUI（有登录认证）
     volumes:
-      - ${DATA_DIR:-./data}:/app/data
+      - goproxy-data:/app/data
     environment:
       - TZ=${TZ:-Asia/Shanghai}
       - DATA_DIR=/app/data
@@ -30,3 +30,6 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+
+volumes:
+  goproxy-data:
