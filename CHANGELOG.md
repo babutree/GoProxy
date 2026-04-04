@@ -5,6 +5,18 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 版本号遵循 [语义化版本 2.0.0](https://semver.org/lang/zh-CN/)。
 
+## [v0.4.1] - 2026-04-04
+
+### 修复
+
+- 升级 sing-box 从 1.11.8 到 **1.13.5**，修复 anytls 等新协议不支持导致订阅节点启动失败的问题
+- sing-box 启动前新增 `sing-box check` 配置预检，配置无效时输出详细错误而非静默崩溃
+- 捕获 sing-box stderr 输出到 `[sing-box]` 日志，便于排查运行时错误
+- 检测 sing-box 进程启动后立即退出的情况，避免误报"端口未就绪"
+- Docker healthcheck 从 `wget` 改为 `curl`（debian-slim 无 wget），Dockerfile 增加 curl 安装
+- 修复 `docker-compose.dokploy.yml` 服务未加入 `dokploy-network` 的问题
+- 修复中英文切换时订阅池统计模块动态文字未更新的问题
+
 ## [v0.4.0] - 2026-04-04
 
 ### 新增

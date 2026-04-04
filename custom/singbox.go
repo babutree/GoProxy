@@ -361,20 +361,45 @@ func convertPluginOpts(plugin string, opts map[string]interface{}) string {
 
 // startLocked 启动 sing-box（需持有锁）
 func (s *SingBoxProcess) startLocked() error {
-	if _, err := exec.LookPath(s.binPath); err != nil {
+	binPath, err := exec.LookPath(s.binPath)
+	if err != nil {
 		return fmt.Errorf("sing-box 未找到: %s（请安装 sing-box 或设置 SINGBOX_PATH）", s.binPath)
 	}
 
-	s.cmd = exec.Command(s.binPath, "run", "-c", s.configFile, "-D", s.configDir)
+	// 先检查配置是否有效
+	checkCmd := exec.Command(binPath, "check", "-c", s.configFile, "-D", s.configDir)
+	if checkOutput, err := checkCmd.CombinedOutput(); err != nil {
+		log.Printf("[custom] ❌ sing-box 配置检查失败:\n%s", string(checkOutput))
+		return fmt.Errorf("sing-box 配置无效: %s", string(checkOutput))
+	}
+
+	s.cmd = exec.Command(binPath, "run", "-c", s.configFile, "-D", s.configDir)
+
+	// 捕获 stderr 用于错误诊断
+	stderrPipe, _ := s.cmd.StderrPipe()
 	s.cmd.Stdout = os.Stdout
-	s.cmd.Stderr = os.Stderr
 
 	if err := s.cmd.Start(); err != nil {
-		return err
+		return fmt.Errorf("sing-box 启动失败: %w", err)
 	}
 	s.running = true
 
+	// 异步读取 stderr 并输出到日志
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := stderrPipe.Read(buf)
+			if n > 0 {
+				log.Printf("[sing-box] %s", strings.TrimSpace(string(buf[:n])))
+			}
+			if err != nil {
+				break
+			}
+		}
+	}()
+
 	// 监控进程退出
+	exitCh := make(chan struct{})
 	go func() {
 		if s.cmd != nil && s.cmd.Process != nil {
 			s.cmd.Wait()
@@ -382,12 +407,20 @@ func (s *SingBoxProcess) startLocked() error {
 			s.running = false
 			s.mu.Unlock()
 		}
+		close(exitCh)
 	}()
 
 	// 等待端口就绪（最多 10 秒）
-	log.Printf("[custom] sing-box 启动中，等待端口就绪...")
+	log.Printf("[custom] sing-box 启动中，等待端口就绪（配置: %s）...", s.configFile)
 	ready := false
 	for i := 0; i < 20; i++ {
+		// 检查进程是否已退出
+		select {
+		case <-exitCh:
+			return fmt.Errorf("sing-box 进程启动后立即退出，请检查日志")
+		default:
+		}
+
 		time.Sleep(500 * time.Millisecond)
 		// 检查第一个端口是否可连
 		for _, port := range s.portMap {
