@@ -12,20 +12,22 @@ GoProxy 的所有运行时数据和配置存储在数据目录中。
 
 包含两张表：
 
-**`proxies` 表**：代理池数据
-- 代理地址、协议类型
+**`proxies` 表**：上游节点数据（手动节点 + 订阅节点）
+- 节点地址、协议类型
+- 地域（region）、地域来源（region_source: manual/auto）、备注（note）
 - 出口 IP、地理位置
 - 延迟、质量等级
 - 使用统计（使用次数、成功次数、失败次数）
-- 状态信息（active/degraded/candidate_replace）
+- 状态信息（active/degraded/disabled）
+- 来源（source: manual/subscription）、所属订阅 ID
 - 时间戳（最后使用、最后检查、创建时间）
 
-**`source_status` 表**：代理源状态
-- 源 URL
-- 成功/失败次数、连续失败次数
-- 最后成功/失败时间
-- 状态（active/degraded/disabled）
-- 禁用到期时间
+**`subscriptions` 表**：订阅信息
+- 名称、URL、本地文件路径、格式
+- 刷新间隔、最后拉取时间、最后成功时间
+- 状态（active/paused）、节点数
+
+> 注：旧版 `source_status`（公共源断路器）表已在本网关模型中废弃，启动时会自动 `DROP`。
 
 ### 2. SQLite WAL 模式文件
 
@@ -43,11 +45,12 @@ GoProxy 的所有运行时数据和配置存储在数据目录中。
 **`config.json`** - 运行时配置（通过 WebUI 修改的配置）
 
 包含：
-- 池子容量配置（max_size、http_ratio、min_per_protocol）
-- 延迟标准配置（max_latency_*）
-- 验证配置（concurrency、timeout）
-- 健康检查配置（interval、batch_size）
-- 优化配置（interval、replace_threshold）
+- 端口配置（http_port、socks5_port、webui_port）
+- 代理认证（proxy_auth_enabled、proxy_auth_username、proxy_auth_password）
+- 会话与地域（session_ttl_minutes、default_region）
+- 健康检查间隔（health_check_interval）、最大重试（max_retry）
+- sing-box 路径（singbox_path）
+- 地域过滤（allowed_countries、blocked_countries）
 
 > 💡 **注意**：`config.json` 是运行时生成的，首次启动时不存在，使用默认配置。通过 WebUI 修改配置后会自动保存到此文件。
 
@@ -137,14 +140,14 @@ volumes:
 ### 为什么需要持久化？
 
 **持久化数据**：
-- 容器重启/更新后代理池数据不丢失
+- 容器重启/更新后手动节点与订阅节点数据不丢失
 - 配置修改持久保存
-- 源状态（断路器）持续跟踪
+- 订阅的最后成功刷新时间持续跟踪
 
 **不挂载的后果**：
-- ❌ 每次重启都需要重新抓取代理（耗时、耗资源）
+- ❌ 每次重启都需要重新拉取并验证订阅节点（耗时、耗资源）
 - ❌ WebUI 的配置修改会丢失
-- ❌ 源的失败记录清零（可能重复尝试失效源）
+- ❌ 手动录入的节点与订阅记录丢失
 
 ### Docker Compose 配置
 
@@ -185,11 +188,11 @@ sqlite3 proxy.db "SELECT address, protocol, exit_location, latency, quality_grad
 # 查看质量分布
 sqlite3 proxy.db "SELECT quality_grade, COUNT(*) FROM proxies GROUP BY quality_grade;"
 
-# 查看国家分布
-sqlite3 proxy.db "SELECT SUBSTR(exit_location, 1, 2) AS country, COUNT(*) FROM proxies GROUP BY country ORDER BY COUNT(*) DESC;"
+# 查看地域分布
+sqlite3 proxy.db "SELECT region, COUNT(*) FROM proxies WHERE region != '' GROUP BY region ORDER BY COUNT(*) DESC;"
 
-# 查看源状态
-sqlite3 proxy.db "SELECT url, status, consecutive_fails, last_success FROM source_status;"
+# 查看订阅状态
+sqlite3 proxy.db "SELECT name, status, proxy_count, last_success FROM subscriptions;"
 ```
 
 ### 查看配置文件
