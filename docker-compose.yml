@@ -16,10 +16,8 @@ services:
     environment:
       - TZ=${TZ:-Asia/Shanghai}
       - DATA_DIR=/app/data
-      - WEBUI_PASSWORD=${WEBUI_PASSWORD:-goproxy}
-      - PROXY_AUTH_ENABLED=${PROXY_AUTH_ENABLED:-false}
-      - PROXY_AUTH_USERNAME=${PROXY_AUTH_USERNAME:-acct}
-      - PROXY_AUTH_PASSWORD=${PROXY_AUTH_PASSWORD}
+      # 登录凭据（WebUI 密码、代理账号/密码）在首次启动时自动生成并打印到日志，
+      # 存入 config.json；此处不再通过环境变量注入。用 docker compose logs 查看首次凭据。
       - SESSION_TTL_MINUTES=${SESSION_TTL_MINUTES:-10}
       - DEFAULT_REGION=${DEFAULT_REGION}
       - ALLOWED_COUNTRIES=${ALLOWED_COUNTRIES}

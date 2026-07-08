@@ -2,7 +2,6 @@ package main
 
 import (
 	"log"
-	"os"
 	"time"
 
 	"goproxy/checker"
@@ -22,11 +21,10 @@ func main() {
 	// 加载配置
 	cfg := config.Load()
 
-	// 提示密码信息
-	if os.Getenv("WEBUI_PASSWORD") == "" {
-		log.Printf("[main] WebUI 使用默认密码: %s（可通过环境变量 WEBUI_PASSWORD 自定义）", config.DefaultPassword)
-	} else {
-		log.Println("[main] WebUI 密码已通过环境变量 WEBUI_PASSWORD 设置")
+	// 首次启动会自动生成随机凭据，仅在此处一次性打印明文。
+	// 之后重启不再显示，用户须用这些凭据登录 WebUI 后自行修改。
+	if boot := config.FirstBootCredentials(); boot != nil {
+		logFirstBootCredentials(boot)
 	}
 
 	log.Printf("[main] 代理网关配置: HTTP=%s SOCKS5=%s WebUI=%s SessionTTL=%dmin",
@@ -89,4 +87,20 @@ func main() {
 	if err := socks5Server.Start(); err != nil {
 		log.Fatalf("socks5 proxy server: %v", err)
 	}
+}
+
+// logFirstBootCredentials 在首次启动时一次性打印自动生成的凭据。
+// 这些明文仅此一次出现在日志中；重启后不再显示。用户应尽快登录 WebUI 修改。
+func logFirstBootCredentials(boot *config.FirstBootInfo) {
+	log.Println("[main] ============================================================")
+	log.Println("[main] 首次启动：已自动生成登录凭据（仅显示这一次，请立即保存）")
+	if boot.WebUIPassword != "" {
+		log.Printf("[main]   WebUI 登录密码 : %s", boot.WebUIPassword)
+	}
+	if boot.ProxyAuthPassword != "" {
+		log.Printf("[main]   代理认证用户名 : %s", boot.ProxyAuthUsername)
+		log.Printf("[main]   代理认证密码   : %s", boot.ProxyAuthPassword)
+	}
+	log.Println("[main]   登录 WebUI 后可在“系统设置”中修改这些凭据。")
+	log.Println("[main] ============================================================")
 }

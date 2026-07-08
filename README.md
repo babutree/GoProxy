@@ -33,7 +33,17 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-Open the WebUI at `http://localhost:7800`. The default WebUI password is `goproxy`; set `WEBUI_PASSWORD` before production use.
+On first start, the gateway auto-generates a WebUI password and proxy
+authentication credentials, and prints them **once** to the container log:
+
+```bash
+docker compose logs | grep "首次启动"
+```
+
+Save those credentials, then open the WebUI at `http://localhost:7800` and log
+in. You can change all credentials later under **Settings**. The credentials are
+persisted (hashed for the WebUI password) in `config.json` inside the data
+volume; they are not shown again on later restarts.
 
 ### Local Run
 
@@ -53,13 +63,15 @@ $env:GOPROXY="https://goproxy.cn,direct"
 
 ## Proxy Authentication And Username DSL
 
-Enable proxy authentication when exposing proxy ports outside a trusted network:
+Proxy authentication is enabled by default. The base username (default `acct`)
+and password are auto-generated on first boot and printed once to the log; the
+password is stored in `config.json`. Change them in the WebUI **Settings** page.
 
-```env
-PROXY_AUTH_ENABLED=true
-PROXY_AUTH_USERNAME=acct
-PROXY_AUTH_PASSWORD=change-me
-```
+> Proxy credentials must be stored in recoverable form (not just a hash) because
+> the SOCKS5 username/password auth scheme (RFC 1929) compares the plaintext the
+> client sends. `config.json` therefore holds the proxy password in clear text;
+> it lives only in the data volume, is `chmod 0644`, and is excluded from git.
+> The WebUI login password is stored as a hash, not clear text.
 
 ### How routing is passed
 
@@ -79,13 +91,14 @@ For example, `acct-region-jp-session-browser` is parsed by the server as:
 
 | Part | Value | Role |
 |------|-------|------|
-| base | `acct` | Must equal `PROXY_AUTH_USERNAME`. This is the only part checked against the configured credential. |
+| base | `acct` | Must equal the configured proxy username (default `acct`, editable in Settings). This is the only part checked against the credential. |
 | region | `jp` | Selects a `jp` region node. |
 | session | `browser` | Sticky key: same key reuses the same exit node within the TTL. |
 
-Only the **base** takes part in password authentication (base must equal
-`PROXY_AUTH_USERNAME`, and the password must equal `PROXY_AUTH_PASSWORD`). The
-`-region-` and `-session-` parts are routing hints, not credentials.
+Only the **base** takes part in password authentication (base must equal the
+configured proxy username, and the password must equal the configured proxy
+password). The `-region-` and `-session-` parts are routing hints, not
+credentials.
 
 ### Username forms
 
@@ -96,9 +109,10 @@ Only the **base** takes part in password authentication (base must equal
 | `acct-session-browser` | Bind session key `browser` to one node for the configured TTL. |
 | `acct-region-jp-session-app01` | Use `jp` nodes and keep session `app01` sticky when possible. |
 
-> Replace `acct` with whatever you set in `PROXY_AUTH_USERNAME`. If your base
-> username is `myuser`, the strings become `myuser-region-us`, etc. The base
-> prefix is fixed by config; the suffixes are chosen per request.
+> Replace `acct` with the configured proxy username (default `acct`, editable in
+> the WebUI Settings). If your base username is `myuser`, the strings become
+> `myuser-region-us`, etc. The base prefix is fixed by config; the suffixes are
+> chosen per request.
 
 ### The region code
 
@@ -131,7 +145,7 @@ Only the **base** takes part in password authentication (base must equal
 
 ## Using The Proxy
 
-The examples below assume proxy authentication is enabled (`PROXY_AUTH_ENABLED=true`) with username `acct` and password `change-me`. When authentication is disabled, drop the `user:pass@` part.
+The examples below use the base username `acct` and password `change-me` as placeholders. Replace them with your actual credentials (the auto-generated proxy password shown once in the logs on first boot, or whatever you later set in the WebUI). Proxy authentication is enabled by default.
 
 ### HTTP proxy (plain HTTP target)
 
@@ -208,10 +222,6 @@ Subscription nodes are managed through subscription operations. Manual-node dele
 | `WEBUI_PORT` | `7800` | WebUI listen port. |
 | `SOCKS5_PORT` | `7801` | SOCKS5 gateway listen port. |
 | `HTTP_PORT` | `7802` | HTTP gateway listen port. |
-| `WEBUI_PASSWORD` | `goproxy` | WebUI admin password. |
-| `PROXY_AUTH_ENABLED` | `false` | Enables proxy username/password auth. |
-| `PROXY_AUTH_USERNAME` | `acct` | Base proxy username before DSL suffixes. |
-| `PROXY_AUTH_PASSWORD` | empty | Proxy password. Required when auth is enabled. |
 | `SESSION_TTL_MINUTES` | `10` | Sticky session binding TTL. |
 | `DEFAULT_REGION` | empty | Optional default region for requests without `-region-`. |
 | `ALLOWED_COUNTRIES` | empty | Comma-separated allowlist; takes priority when set. |
@@ -222,7 +232,13 @@ Subscription nodes are managed through subscription operations. Manual-node dele
 | `DATA_DIR` | empty | Optional directory for SQLite DB and generated subscription files. |
 | `TZ` | `Asia/Shanghai` | Container timezone. |
 
-Saved WebUI settings are written to `config.json` under `DATA_DIR` and override environment defaults after the first save.
+Credentials (WebUI password, proxy auth username/password) are **not** set via
+environment variables. On first boot the server generates them, prints them once
+to the container log, and stores them in `config.json` under `DATA_DIR`. Edit
+them afterwards in the WebUI **Settings** panel. All other settings are seeded
+from the environment on first boot and then persisted to `config.json`, which is
+the source of truth on subsequent starts. To reset everything, delete
+`config.json` from the data volume.
 
 ## Data Model
 
@@ -246,8 +262,10 @@ docker compose up -d --build
 
 Security recommendations:
 
-- Change `WEBUI_PASSWORD` before exposing the WebUI.
-- Enable proxy authentication for non-local deployments.
+- On first boot the gateway prints an auto-generated WebUI password and proxy
+  credentials **once** to the container log (`docker compose logs`). Save them,
+  then log in and change them in Settings.
+- Proxy authentication is enabled by default with the generated credentials.
 - Restrict inbound firewall rules to trusted clients when possible.
 - Treat upstream node credentials and subscription URLs as secrets.
 
