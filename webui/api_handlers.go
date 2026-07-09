@@ -41,19 +41,38 @@ func (s *Server) apiStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiProxies(w http.ResponseWriter, r *http.Request) {
-	protocol := r.URL.Query().Get("protocol")
-	var proxies []storage.Proxy
-	var err error
-	if protocol != "" {
-		proxies, err = s.storage.GetByProtocol(protocol)
-	} else {
-		proxies, err = s.storage.GetAll()
-	}
+	// 返回全部节点（含 disabled/paused），以便前端展示并对停用节点执行启用操作。
+	// 协议筛选交由前端处理，避免停用节点从列表消失后无法再启用。
+	proxies, err := s.storage.GetAllForAdmin()
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	jsonOK(w, proxies)
+
+	// 构建 subscription_id -> name 映射，供前端以订阅名称区分节点来源，
+	// 而非笼统地显示 "subscription"。
+	nameByID := map[int64]string{}
+	if subs, subErr := s.storage.GetSubscriptions(); subErr == nil {
+		for _, sub := range subs {
+			nameByID[sub.ID] = sub.Name
+		}
+	}
+
+	type proxyView struct {
+		storage.Proxy
+		SubscriptionName string `json:"subscription_name"`
+	}
+	views := make([]proxyView, 0, len(proxies))
+	for _, p := range proxies {
+		name := ""
+		if p.Source == storage.SourceSubscription {
+			if n, ok := nameByID[p.SubscriptionID]; ok {
+				name = n
+			}
+		}
+		views = append(views, proxyView{Proxy: p, SubscriptionName: name})
+	}
+	jsonOK(w, views)
 }
 
 func (s *Server) apiDeleteProxy(w http.ResponseWriter, r *http.Request) {
@@ -70,6 +89,33 @@ func (s *Server) apiDeleteProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	s.storage.Delete(req.Address)
 	jsonOK(w, map[string]string{"status": "deleted"})
+}
+
+// apiToggleProxy 停用/启用单个节点，供用户手动屏蔽不想使用的节点。
+func (s *Server) apiToggleProxy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Address string `json:"address"`
+		Enable  bool   `json:"enable"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Address == "" {
+		jsonError(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	var err error
+	if req.Enable {
+		err = s.storage.EnableProxy(req.Address)
+	} else {
+		err = s.storage.DisableProxy(req.Address)
+	}
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, map[string]string{"status": "toggled"})
 }
 
 func (s *Server) apiRefreshProxy(w http.ResponseWriter, r *http.Request) {

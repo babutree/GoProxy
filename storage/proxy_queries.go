@@ -38,6 +38,27 @@ func (s *Storage) GetAll() ([]Proxy, error) {
 	return s.GetAllFiltered("")
 }
 
+// GetAllForAdmin 获取所有节点（含 disabled），供 WebUI 管理展示。
+// 与 GetAll 不同：不过滤 status/fail_count，以便用户能看到并重新启用被停用的节点。
+func (s *Storage) GetAllForAdmin() ([]Proxy, error) {
+	rows, err := s.db.Query(`SELECT ` + proxyColumns + ` FROM proxies ORDER BY
+		CASE WHEN status = 'disabled' THEN 1 ELSE 0 END, latency ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var proxies []Proxy
+	for rows.Next() {
+		p, err := scanProxy(rows)
+		if err != nil {
+			return nil, err
+		}
+		proxies = append(proxies, *p)
+	}
+	return proxies, nil
+}
+
 // GetAllFiltered 获取可用节点（可按来源过滤）
 // sourceFilter: "" = 全部, "subscription" = 订阅节点, "manual" = 手动节点
 func (s *Storage) GetAllFiltered(sourceFilter string) ([]Proxy, error) {
