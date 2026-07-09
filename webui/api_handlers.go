@@ -105,11 +105,12 @@ func (s *Server) apiToggleProxy(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "invalid request", http.StatusBadRequest)
 		return
 	}
+	// 手动停用用 paused（区别于验证失败的 disabled），启用用 UnpauseProxy 恢复。
 	var err error
 	if req.Enable {
-		err = s.storage.EnableProxy(req.Address)
+		err = s.storage.UnpauseProxy(req.Address)
 	} else {
-		err = s.storage.DisableProxy(req.Address)
+		err = s.storage.PauseProxy(req.Address)
 	}
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusInternalServerError)

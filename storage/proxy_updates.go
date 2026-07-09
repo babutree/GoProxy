@@ -157,6 +157,25 @@ func (s *Storage) EnableProxy(address string) error {
 	return err
 }
 
+// PauseProxy 用户手动停用节点，状态置为 'paused' 以区别于验证失败的 'disabled'。
+// paused 表示“用户主动不用”，disabled 表示“系统判定不可用”。两者都不参与选路。
+func (s *Storage) PauseProxy(address string) error {
+	_, err := s.db.Exec(
+		`UPDATE proxies SET status = 'paused' WHERE address = ?`,
+		address,
+	)
+	return err
+}
+
+// UnpauseProxy 恢复用户手动停用的节点，重置失败计数后置为 active。
+func (s *Storage) UnpauseProxy(address string) error {
+	_, err := s.db.Exec(
+		`UPDATE proxies SET status = 'active', fail_count = 0 WHERE address = ?`,
+		address,
+	)
+	return err
+}
+
 // DeleteBySource 删除指定来源的所有代理
 func (s *Storage) DeleteBySource(source string) (int64, error) {
 	res, err := s.db.Exec(`DELETE FROM proxies WHERE source = ?`, source)

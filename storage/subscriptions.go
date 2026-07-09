@@ -189,14 +189,15 @@ func (s *Storage) ToggleSubscription(id int64) (string, error) {
 		return "", err
 	}
 
-	// 联动节点：暂停→禁用；启用→恢复为 active 并重置失败计数。
+	// 联动节点：暂停→paused（用户主动暂停，区别于验证失败的 disabled）；
+	// 启用→将 paused 节点恢复为 active 并重置失败计数（不动验证失败的 disabled 节点）。
 	if newStatus == "paused" {
-		if _, err := tx.Exec(`UPDATE proxies SET status = 'disabled' WHERE subscription_id = ?`, id); err != nil {
+		if _, err := tx.Exec(`UPDATE proxies SET status = 'paused' WHERE subscription_id = ? AND status != 'disabled'`, id); err != nil {
 			return "", err
 		}
 	} else {
 		if _, err := tx.Exec(
-			`UPDATE proxies SET status = 'active', fail_count = 0 WHERE subscription_id = ? AND status = 'disabled'`,
+			`UPDATE proxies SET status = 'active', fail_count = 0 WHERE subscription_id = ? AND status = 'paused'`,
 			id,
 		); err != nil {
 			return "", err
