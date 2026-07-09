@@ -72,19 +72,99 @@ func (s *SingBoxProcess) Reload(nodes []ParsedNode) error {
 		return fmt.Errorf("生成 sing-box 配置失败: %w", err)
 	}
 
+	// 健壮性：整份配置若校验失败，二分剔除坏节点，用剩余可用节点重建，
+	// 避免单个非法节点拖垮全部订阅（一坏全灭）。
+	goodNodes := s.pruneInvalidNodes(tunnelNodes)
+	if len(goodNodes) == 0 {
+		s.stopLocked()
+		s.nodes = nil
+		s.portMap = make(map[string]int)
+		return fmt.Errorf("所有隧道节点均无法通过 sing-box 校验")
+	}
+	if len(goodNodes) != len(tunnelNodes) {
+		log.Printf("[custom] ⚠️ 剔除 %d 个非法节点，保留 %d 个可用节点",
+			len(tunnelNodes)-len(goodNodes), len(goodNodes))
+		if err := s.generateConfig(goodNodes); err != nil {
+			return fmt.Errorf("重建 sing-box 配置失败: %w", err)
+		}
+	}
+
 	// 重启进程
 	s.stopLocked()
 	if err := s.startLocked(); err != nil {
 		return fmt.Errorf("启动 sing-box 失败: %w", err)
 	}
 
-	s.nodes = tunnelNodes
+	s.nodes = goodNodes
 	return nil
 }
 
-// generateConfig 生成 sing-box JSON 配置
+// checkNodes 生成一份仅含给定节点的临时配置并运行 sing-box check，返回是否通过。
+// 不改动 s.portMap / s.configFile 等运行态，仅用于校验探测。
+func (s *SingBoxProcess) checkNodes(nodes []ParsedNode) bool {
+	if len(nodes) == 0 {
+		return true
+	}
+	data, err := s.buildConfigBytes(nodes)
+	if err != nil {
+		return false
+	}
+	tmp, err := os.CreateTemp(s.configDir, "check-*.json")
+	if err != nil {
+		return false
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return false
+	}
+	tmp.Close()
+
+	binPath, err := exec.LookPath(s.binPath)
+	if err != nil {
+		return false
+	}
+	cmd := exec.Command(binPath, "check", "-c", tmpPath, "-D", s.configDir)
+	return cmd.Run() == nil
+}
+
+// pruneInvalidNodes 返回能通过 sing-box 校验的节点子集。
+// 若整体已通过则原样返回；否则二分递归定位并剔除坏节点。
+func (s *SingBoxProcess) pruneInvalidNodes(nodes []ParsedNode) []ParsedNode {
+	if s.checkNodes(nodes) {
+		return nodes
+	}
+	if len(nodes) == 1 {
+		log.Printf("[custom] 节点 %s (%s) 无法通过 sing-box 校验，剔除", nodes[0].Name, nodes[0].Type)
+		return nil
+	}
+	mid := len(nodes) / 2
+	left := s.pruneInvalidNodes(nodes[:mid])
+	right := s.pruneInvalidNodes(nodes[mid:])
+	return append(left, right...)
+}
+
+// generateConfig 生成 sing-box JSON 配置并写入运行态（更新 s.portMap、写 configFile）。
 func (s *SingBoxProcess) generateConfig(nodes []ParsedNode) error {
-	s.portMap = make(map[string]int)
+	config, portMap := s.assembleConfig(nodes)
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return err
+	}
+	s.portMap = portMap
+	return os.WriteFile(s.configFile, data, 0644)
+}
+
+// buildConfigBytes 生成配置 JSON 字节，但不改动运行态；供 checkNodes 探测校验使用。
+func (s *SingBoxProcess) buildConfigBytes(nodes []ParsedNode) ([]byte, error) {
+	config, _ := s.assembleConfig(nodes)
+	return json.MarshalIndent(config, "", "  ")
+}
+
+// assembleConfig 组装 sing-box 配置 map 及对应的 nodeKey→port 映射，无副作用（不写状态/文件）。
+func (s *SingBoxProcess) assembleConfig(nodes []ParsedNode) (map[string]interface{}, map[string]int) {
+	portMap := make(map[string]int)
 	port := s.basePort
 
 	var inbounds []map[string]interface{}
@@ -94,8 +174,15 @@ func (s *SingBoxProcess) generateConfig(nodes []ParsedNode) error {
 	for i, node := range nodes {
 		port++
 		key := node.NodeKey()
-		s.portMap[key] = port
 		tag := fmt.Sprintf("node-%d", i)
+
+		// 出站：根据节点类型生成（失败节点跳过，不占端口）
+		outbound, err := buildOutbound(node, tag)
+		if err != nil {
+			log.Printf("[custom] 跳过节点 %s (%s): %v", node.Name, node.Type, err)
+			continue
+		}
+		portMap[key] = port
 
 		// 入站：本地 SOCKS5 监听
 		inbounds = append(inbounds, map[string]interface{}{
@@ -104,14 +191,6 @@ func (s *SingBoxProcess) generateConfig(nodes []ParsedNode) error {
 			"listen":      "127.0.0.1",
 			"listen_port": port,
 		})
-
-		// 出站：根据节点类型生成
-		outbound, err := buildOutbound(node, tag)
-		if err != nil {
-			log.Printf("[custom] 跳过节点 %s (%s): %v", node.Name, node.Type, err)
-			delete(s.portMap, key)
-			continue
-		}
 		outbounds = append(outbounds, outbound)
 
 		// 路由规则：入站 → 出站
@@ -151,13 +230,7 @@ func (s *SingBoxProcess) generateConfig(nodes []ParsedNode) error {
 			},
 		},
 	}
-
-	data, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	return os.WriteFile(s.configFile, data, 0644)
+	return config, portMap
 }
 
 // buildOutbound 根据节点类型构建 sing-box 出站配置。
