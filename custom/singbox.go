@@ -14,6 +14,11 @@ import (
 	"time"
 )
 
+// portRangeSpan 是端口范围轮换的跨度。每次 Reload 在 basePort+0 与 basePort+portRangeSpan
+// 两个不重叠的端口段之间交替，避免新进程与正在退出的旧进程抢占同一端口。
+// 取值须大于单次可能管理的最大节点数（此处 5000 足够）。
+const portRangeSpan = 5000
+
 // SingBoxProcess 管理 sing-box 子进程
 type SingBoxProcess struct {
 	cmd        *exec.Cmd
@@ -21,11 +26,16 @@ type SingBoxProcess struct {
 	configDir  string
 	configFile string
 	basePort   int
+	portOffset int            // 端口范围偏移，每次 Reload 在 0/portRangeSize 间交替，避免新旧进程抢端口
 	portMap    map[string]int // nodeKey → 本地端口
 	nodes      []ParsedNode
 	mu         sync.Mutex
 	running    bool
 }
+
+// portRangeSize 是端口范围轮换的跨度。Reload 时新进程使用与刚停止的旧进程
+// 不重叠的端口段，避免旧进程 socket 尚未释放导致 "address already in use"。
+const portRangeSize = 5000
 
 // NewSingBoxProcess 创建 sing-box 进程管理器
 func NewSingBoxProcess(binPath, dataDir string, basePort int) *SingBoxProcess {
@@ -65,6 +75,14 @@ func (s *SingBoxProcess) Reload(nodes []ParsedNode) error {
 		s.nodes = nil
 		s.portMap = make(map[string]int)
 		return nil
+	}
+
+	// 端口范围轮换：在 0 / portRangeSpan 两个偏移间交替，使新进程与正在停止、
+	// socket 尚未完全释放的旧进程不抢占同一批端口，避免 "address already in use"。
+	if s.portOffset == 0 {
+		s.portOffset = portRangeSpan
+	} else {
+		s.portOffset = 0
 	}
 
 	// 生成配置
@@ -165,7 +183,7 @@ func (s *SingBoxProcess) buildConfigBytes(nodes []ParsedNode) ([]byte, error) {
 // assembleConfig 组装 sing-box 配置 map 及对应的 nodeKey→port 映射，无副作用（不写状态/文件）。
 func (s *SingBoxProcess) assembleConfig(nodes []ParsedNode) (map[string]interface{}, map[string]int) {
 	portMap := make(map[string]int)
-	port := s.basePort
+	port := s.basePort + s.portOffset
 
 	var inbounds []map[string]interface{}
 	var outbounds []map[string]interface{}
