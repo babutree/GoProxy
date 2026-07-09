@@ -196,7 +196,8 @@ func buildOutbound(node ParsedNode, tag string) (map[string]interface{}, error) 
 	case "trojan":
 		out["type"] = "trojan"
 		out["password"] = getStr(raw, "password")
-		applyTLS(raw, out)
+		// 标准 trojan 强制走 TLS；源配置常省略 tls 标记，需强制生成 TLS 段。
+		forceTLS(raw, out)
 		if err := applyTransport(raw, out); err != nil {
 			return nil, err
 		}
@@ -215,7 +216,8 @@ func buildOutbound(node ParsedNode, tag string) (map[string]interface{}, error) 
 	case "hysteria2":
 		out["type"] = "hysteria2"
 		out["password"] = getStr(raw, "password")
-		applyTLS(raw, out)
+		// hysteria2 基于 QUIC/TLS，sing-box 强制要求 TLS 段。
+		forceTLS(raw, out)
 
 	case "hysteria":
 		out["type"] = "hysteria"
@@ -226,14 +228,16 @@ func buildOutbound(node ParsedNode, tag string) (map[string]interface{}, error) 
 		if down := getStr(raw, "down"); down != "" {
 			out["down_mbps"] = parseSpeed(down)
 		}
-		applyTLS(raw, out)
+		// hysteria 基于 QUIC/TLS，sing-box 强制要求 TLS 段。
+		forceTLS(raw, out)
 
 	case "tuic":
 		out["type"] = "tuic"
 		out["uuid"] = getStr(raw, "uuid")
 		out["password"] = getStr(raw, "password")
 		out["congestion_control"] = getStrDefault(raw, "congestion-controller", "bbr")
-		applyTLS(raw, out)
+		// tuic 基于 QUIC/TLS，sing-box 强制要求 TLS 段。
+		forceTLS(raw, out)
 
 	case "anytls":
 		out["type"] = "anytls"
