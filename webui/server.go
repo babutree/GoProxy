@@ -112,6 +112,7 @@ func (s *Server) routes() *http.ServeMux {
 
 	// Public API: only authentication state, with no business data.
 	mux.HandleFunc("/api/auth/check", s.apiAuthCheck)
+	mux.HandleFunc("/api/public-ip", s.authMiddleware(s.apiPublicIP))
 
 	// Business APIs require login. There is no guest/read-only role.
 	mux.HandleFunc("/api/stats", s.authMiddleware(s.apiStats))
