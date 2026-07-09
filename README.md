@@ -295,9 +295,29 @@ Real end-to-end proxy verification needs actual upstream nodes or subscriptions.
 - [GEO_FILTER.md](GEO_FILTER.md): current country filter and region-routing notes.
 - [test/README.md](test/README.md): proxy test scripts.
 
-## Disclaimer
+## Acknowledgment / 致谢
+
+This project is a geo-gateway fork built on top of [isboyjc/GoProxy](https://github.com/isboyjc/GoProxy).
+Thanks to the original author and contributors for the foundational work.
+
+本项目是基于 [isboyjc/GoProxy](https://github.com/isboyjc/GoProxy) 改造的地域网关分支，
+感谢原项目作者与贡献者的基础工作。
+
+## Disclaimer / 免责声明
 
 This project is for learning, research, and management of user-provided upstream proxy resources. Users are responsible for ensuring their upstream nodes, subscriptions, and traffic comply with applicable laws, policies, and service terms.
+
+本项目仅供学习交流和技术研究使用。
+
+- 本项目抓取的代理均来自互联网公开资源，不保证其可用性、稳定性和安全性。
+- 用户应自行承担使用本项目的一切风险，包括但不限于网络安全风险、法律风险等。
+- 请遵守当地法律法规，不得将本项目用于任何违法违规活动。
+- 订阅导入功能仅为方便用户管理自有代理资源，用户应确保其订阅来源合法合规。
+- 访客贡献的订阅由贡献者自行负责，项目维护者不对其内容承担任何责任。
+- 本项目不提供任何形式的代理服务，不对通过本系统传输的内容负责。
+- 作者不对因使用本项目造成的任何直接或间接损失承担责任。
+
+使用本项目即表示您已阅读并同意以上声明。
 
 ## License
 
