@@ -131,11 +131,24 @@ func (s *SingBoxProcess) generateConfig(nodes []ParsedNode) error {
 		"log": map[string]interface{}{
 			"level": "warn",
 		},
+		// 本地 DNS server + default_domain_resolver 优先 IPv4 解析节点服务器域名。
+		// 多数容器/宿主无 IPv6 出网，若解析到 IPv6 会导致 "network is unreachable"
+		// 而误判节点不可用。这是 sing-box 1.12+ 对已废弃 outbound.domain_strategy
+		// 的官方替代写法（见 sing-box migration 文档）。
+		"dns": map[string]interface{}{
+			"servers": []map[string]interface{}{
+				{"type": "local", "tag": "local"},
+			},
+		},
 		"inbounds":  inbounds,
 		"outbounds": outbounds,
 		"route": map[string]interface{}{
 			"rules": rules,
 			"final": "direct",
+			"default_domain_resolver": map[string]interface{}{
+				"server":   "local",
+				"strategy": "prefer_ipv4",
+			},
 		},
 	}
 
@@ -155,9 +168,6 @@ func buildOutbound(node ParsedNode, tag string) (map[string]interface{}, error) 
 	out := map[string]interface{}{
 		"tag":    fmt.Sprintf("out-%s", tag),
 		"server": node.Server,
-		// 优先用 IPv4 解析节点服务器域名：多数容器/宿主无 IPv6 出网，
-		// 若服务器域名解析到 IPv6 会导致 "network is unreachable" 而误判节点不可用。
-		"domain_strategy": "prefer_ipv4",
 	}
 
 	// sing-box 使用 server_port 而不是 port
