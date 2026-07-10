@@ -98,6 +98,8 @@ func (s *Storage) UpdateSubscriptionProxyExitInfo(address string, subscriptionID
 // updateExitInfoWhere 写回出口信息与两源风险信号。
 // ipapiis_score 仅在 ipapiisScore >= 0 时更新：探测降级/未知(-1)不得覆盖已有有效分。
 // ipapi_flags 随每次成功探测覆盖写入（含空串——空表示本次探测无命中，语义有效）。
+// ipapi_flags_seen=1 区分“已探测且无命中”和“旧数据/未探测”。
+// 注意：本函数不改 status——订阅流程依赖 Disable/Enable 分离，恢复启用由调用点显式处理。
 func (s *Storage) updateExitInfoWhere(where string, args []interface{}, exitIP, exitLocation string, latencyMs int, ipapiisScore float64, ipapiFlags string) error {
 	grade := CalculateQualityGrade(latencyMs)
 	region := regionFromExitLocation(exitLocation)
@@ -112,7 +114,8 @@ func (s *Storage) updateExitInfoWhere(where string, args []interface{}, exitIP, 
 		 SET exit_ip = ?, exit_location = ?, latency = ?, quality_grade = ?, fail_count = 0,
 		     region = CASE WHEN region_source != 'manual' AND ? != '' THEN ? ELSE region END,
 		     ipapiis_score = CASE WHEN ? >= 0 THEN ? ELSE ipapiis_score END,
-		     ipapi_flags = ?
+		     ipapi_flags = ?,
+		     ipapi_flags_seen = 1
 		 WHERE `+where,
 		queryArgs...,
 	)

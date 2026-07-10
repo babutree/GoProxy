@@ -189,6 +189,13 @@ func (s *Server) apiRefreshProxy(w http.ResponseWriter, r *http.Request) {
 
 		if valid {
 			latencyMs := int(latency.Milliseconds())
+			// 单节点“测试”成功：若此前因验证失败被 disabled，恢复为 active 重新参与选路。
+			// EnableProxyByID 仅对 status='disabled' 生效，且尊重父订阅暂停，不影响 user_paused。
+			if targetProxy.Status == "disabled" {
+				if err := s.storage.EnableProxyByID(targetProxy.ID); err != nil {
+					log.Printf("[webui] re-enable proxy %s after successful test failed: %v", targetProxy.Address, err)
+				}
+			}
 			s.storage.UpdateProxyExitInfo(targetProxy.ID, exitIP, exitLocation, latencyMs, risk.IPAPIIsScore, risk.Flags)
 			log.Printf("[webui] proxy refreshed: %s latency=%dms grade=%s", targetProxy.Address, latencyMs, storage.CalculateQualityGrade(latencyMs))
 		} else {

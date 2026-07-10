@@ -608,15 +608,15 @@ func (m *Manager) addManualTunnelNode(node *ParsedNode, region, note string) err
 	}
 
 	// 方案 B：手动加密节点同样暴露 SOCKS5 + HTTP 两个本地入站，各自入库。
+	// 两条记录必须原子写入，避免前端提示失败但只落库 SOCKS5 的半成功状态。
 	socksAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(socksPort))
-	if err := m.storage.AddManualProxy(socksAddr, "socks5", region, note); err != nil {
-		return fmt.Errorf("存储人工节点(SOCKS5)失败: %w", err)
-	}
+	manualProxies := []storage.Proxy{{Address: socksAddr, Protocol: "socks5"}}
 	if httpPort, ok := m.singbox.GetHTTPPortMap()[key]; ok {
 		httpAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(httpPort))
-		if err := m.storage.AddManualProxy(httpAddr, "http", region, note); err != nil {
-			return fmt.Errorf("存储人工节点(HTTP)失败: %w", err)
-		}
+		manualProxies = append(manualProxies, storage.Proxy{Address: httpAddr, Protocol: "http"})
+	}
+	if err := m.storage.AddManualProxies(manualProxies, region, note); err != nil {
+		return fmt.Errorf("存储人工节点入站失败: %w", err)
 	}
 	return nil
 }

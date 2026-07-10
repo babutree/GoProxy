@@ -1,12 +1,22 @@
 package storage
 
+import "database/sql"
+
 func (s *Storage) AddManualProxy(address, protocol, region, note string) error {
+	return s.addManualProxyExec(s.db, address, protocol, region, note)
+}
+
+type proxyExec interface {
+	Exec(query string, args ...interface{}) (sql.Result, error)
+}
+
+func (s *Storage) addManualProxyExec(exec proxyExec, address, protocol, region, note string) error {
 	region = normalizeManualRegion(region)
 	regionSource := "auto"
 	if region != "" {
 		regionSource = "manual"
 	}
-	_, err := s.db.Exec(
+	_, err := exec.Exec(
 		`INSERT INTO proxies (address, protocol, source, subscription_id, region, region_source, note)
 		 VALUES (?, ?, 'manual', 0, ?, ?, ?)
 		 ON CONFLICT(address, source, subscription_id) DO UPDATE SET
@@ -17,6 +27,20 @@ func (s *Storage) AddManualProxy(address, protocol, region, note string) error {
 		address, normalizeProtocol(protocol), region, regionSource, note,
 	)
 	return err
+}
+
+func (s *Storage) AddManualProxies(proxies []Proxy, region, note string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, proxy := range proxies {
+		if err := s.addManualProxyExec(tx, proxy.Address, proxy.Protocol, region, note); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Storage) UpdateProxyRegion(address, region string, manual bool) error {

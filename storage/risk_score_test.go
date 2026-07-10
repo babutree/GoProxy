@@ -8,12 +8,13 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-// TestRiskColumnsMigrationAndDefault 验证 ipapiis_score / ipapi_flags 两列存在且默认值正确
-// （未探测：ipapiis_score = -1，ipapi_flags = ""）。
+// TestRiskColumnsMigrationAndDefault 验证风险列存在且默认值正确
+// （未探测：ipapiis_score = -1，ipapi_flags = "", ipapi_flags_seen=false）。
 func TestRiskColumnsMigrationAndDefault(t *testing.T) {
 	store := newTestStorage(t)
 	assertColumnExists(t, store, "ipapiis_score")
 	assertColumnExists(t, store, "ipapi_flags")
+	assertColumnExists(t, store, "ipapi_flags_seen")
 
 	insertProxy(t, store, "risk-default:8080", "http", "us", SourceManual, 100, "active", 0)
 	p, err := store.GetProxyByAddress("risk-default:8080")
@@ -26,6 +27,9 @@ func TestRiskColumnsMigrationAndDefault(t *testing.T) {
 	}
 	if p.IPAPIFlags != "" {
 		t.Fatalf("default ipapi_flags = %q, want empty", p.IPAPIFlags)
+	}
+	if p.IPAPIFlagsSeen {
+		t.Fatal("default ipapi_flags_seen = true, want false")
 	}
 }
 
@@ -41,14 +45,16 @@ func TestRiskColumnsMigrationIdempotentOnLegacyDB(t *testing.T) {
 	}
 	assertColumnExists(t, store, "ipapiis_score")
 	assertColumnExists(t, store, "ipapi_flags")
+	assertColumnExists(t, store, "ipapi_flags_seen")
 	// 旧行迁移后默认值。
 	var score float64
 	var flags string
-	if err := store.db.QueryRow(`SELECT ipapiis_score, ipapi_flags FROM proxies WHERE address = '1.1.1.1:8080'`).Scan(&score, &flags); err != nil {
+	var flagsSeen int
+	if err := store.db.QueryRow(`SELECT ipapiis_score, ipapi_flags, ipapi_flags_seen FROM proxies WHERE address = '1.1.1.1:8080'`).Scan(&score, &flags, &flagsSeen); err != nil {
 		t.Fatalf("read migrated risk columns: %v", err)
 	}
-	if score != -1 || flags != "" {
-		t.Fatalf("migrated legacy risk = (%v,%q), want (-1,\"\")", score, flags)
+	if score != -1 || flags != "" || flagsSeen != 0 {
+		t.Fatalf("migrated legacy risk = (%v,%q,%d), want (-1,\"\",0)", score, flags, flagsSeen)
 	}
 	store.Close()
 
@@ -60,9 +66,10 @@ func TestRiskColumnsMigrationIdempotentOnLegacyDB(t *testing.T) {
 	defer store2.Close()
 	assertColumnExists(t, store2, "ipapiis_score")
 	assertColumnExists(t, store2, "ipapi_flags")
+	assertColumnExists(t, store2, "ipapi_flags_seen")
 
 	// 确认两列各只有一列（未被重复添加）。
-	for _, col := range []string{"ipapiis_score", "ipapi_flags"} {
+	for _, col := range []string{"ipapiis_score", "ipapi_flags", "ipapi_flags_seen"} {
 		var count int
 		if err := store2.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('proxies') WHERE name = ?`, col).Scan(&count); err != nil {
 			t.Fatalf("count %s column: %v", col, err)
@@ -92,6 +99,9 @@ func TestUpdateProxyExitInfoWritesRiskSignals(t *testing.T) {
 	if p.IPAPIFlags != "proxy,hosting" {
 		t.Fatalf("ipapi_flags after update = %q, want proxy,hosting", p.IPAPIFlags)
 	}
+	if !p.IPAPIFlagsSeen {
+		t.Fatal("ipapi_flags_seen after update = false, want true")
+	}
 	// 顺带确认出口信息与 fail_count 同路径写入正确（scanProxy 顺序对齐）。
 	if p.ExitIP != "203.0.113.20" || p.Latency != 42 {
 		t.Fatalf("exit info not written correctly: %#v", p)
@@ -120,6 +130,9 @@ func TestUpdateProxyExitInfoNegativeScoreDoesNotOverwrite(t *testing.T) {
 	if p.IPAPIIsScore != 0.80 {
 		t.Fatalf("ipapiis_score after -1 update = %v, want 0.80 (must not overwrite)", p.IPAPIIsScore)
 	}
+	if !p.IPAPIFlagsSeen {
+		t.Fatal("ipapi_flags_seen after -1 update = false, want true")
+	}
 	// 其它字段（如延迟）仍应正常更新，证明只有 ipapiis_score 被条件保护。
 	if p.Latency != 50 {
 		t.Fatalf("latency after -1 update = %d, want 50", p.Latency)
@@ -135,6 +148,43 @@ func TestUpdateProxyExitInfoNegativeScoreDoesNotOverwrite(t *testing.T) {
 	p, _ = store.GetProxyByAddress("risk-keep:8080")
 	if p.IPAPIIsScore != 0 {
 		t.Fatalf("ipapiis_score after 0 then -1 = %v, want 0 (must not overwrite with -1)", p.IPAPIIsScore)
+	}
+}
+
+// TestUpdateProxyExitInfoClearsFailCountAndMarksSeenButKeepsStatus 覆盖成功探测写回契约：
+// UpdateProxyExitInfo 归零 fail_count、置位 ipapi_flags_seen，但不改 status——
+// 状态恢复（disabled→active）由调用点（如 apiRefreshProxy 的 EnableProxyByID）负责，
+// 存储层不在此耦合，避免破坏订阅“先 Disable 再 Enable”流程（见回归 TestProxyIdentityConsistency…）。
+func TestUpdateProxyExitInfoClearsFailCountAndMarksSeenButKeepsStatus(t *testing.T) {
+	store := newTestStorage(t)
+	insertProxy(t, store, "risk-reactivate:8080", "http", "us", SourceManual, 100, "disabled", 3)
+	p, err := store.GetProxyByAddress("risk-reactivate:8080")
+	if err != nil {
+		t.Fatalf("GetProxyByAddress() error = %v", err)
+	}
+
+	if err := store.UpdateProxyExitInfo(p.ID, "203.0.113.22", "US Ashburn", 35, -1, ""); err != nil {
+		t.Fatalf("UpdateProxyExitInfo() error = %v", err)
+	}
+	p, _ = store.GetProxyByAddress("risk-reactivate:8080")
+	// fail_count 归零 + flags_seen 置位；status 保持 disabled（恢复由调用点负责，不在存储层）。
+	if p.FailCount != 0 {
+		t.Fatalf("fail_count after success = %d, want 0", p.FailCount)
+	}
+	if p.Status != "disabled" {
+		t.Fatalf("status after UpdateProxyExitInfo = %q, want disabled (reactivation is caller's job)", p.Status)
+	}
+	if !p.IPAPIFlagsSeen {
+		t.Fatal("ipapi_flags_seen after clean successful probe = false, want true")
+	}
+
+	// 调用点契约：EnableProxyByID 恢复 disabled→active，但不动 user_paused。
+	if err := store.EnableProxyByID(p.ID); err != nil {
+		t.Fatalf("EnableProxyByID() error = %v", err)
+	}
+	p, _ = store.GetProxyByAddress("risk-reactivate:8080")
+	if p.Status != "active" {
+		t.Fatalf("status after EnableProxyByID = %q, want active", p.Status)
 	}
 }
 
@@ -159,13 +209,13 @@ func TestProxyColumnsMatchScanProxy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rows.Columns(): %v", err)
 	}
-	// 当前模型：id..note(20) + ipapiis_score + ipapi_flags = 22 列。硬编码断言，防止任一侧漏改。
-	if len(cols) != 22 {
-		t.Fatalf("proxyColumns yields %d columns, want 22 (id..note + ipapiis_score + ipapi_flags)", len(cols))
+	// 当前模型：id..note(20) + ipapiis_score + ipapi_flags + ipapi_flags_seen = 23 列。硬编码断言，防止任一侧漏改。
+	if len(cols) != 23 {
+		t.Fatalf("proxyColumns yields %d columns, want 23 (id..note + risk columns)", len(cols))
 	}
-	// 最后两列必须是 ipapiis_score, ipapi_flags，与 scanProxy 末尾 &p.IPAPIIsScore,&p.IPAPIFlags 对齐。
-	if cols[len(cols)-2] != "ipapiis_score" || cols[len(cols)-1] != "ipapi_flags" {
-		t.Fatalf("last two SELECT columns = %q,%q, want ipapiis_score,ipapi_flags", cols[len(cols)-2], cols[len(cols)-1])
+	// 最后三列必须与 scanProxy 末尾风险字段对齐。
+	if cols[len(cols)-3] != "ipapiis_score" || cols[len(cols)-2] != "ipapi_flags" || cols[len(cols)-1] != "ipapi_flags_seen" {
+		t.Fatalf("last three SELECT columns = %q,%q,%q, want risk columns", cols[len(cols)-3], cols[len(cols)-2], cols[len(cols)-1])
 	}
 
 	if !rows.Next() {
@@ -176,7 +226,7 @@ func TestProxyColumnsMatchScanProxy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("scanProxy failed (proxyColumns/scanProxy out of sync?): %v", err)
 	}
-	if p.Address != "cols-sync:8080" || p.IPAPIIsScore != 0.55 || p.IPAPIFlags != "hosting" || p.Latency != 123 {
+	if p.Address != "cols-sync:8080" || p.IPAPIIsScore != 0.55 || p.IPAPIFlags != "hosting" || !p.IPAPIFlagsSeen || p.Latency != 123 {
 		t.Fatalf("scanned proxy mismatch: %#v", p)
 	}
 	if rows.Err() != nil {
@@ -201,5 +251,8 @@ func TestProxyColumnsIncludesRiskColumns(t *testing.T) {
 	}
 	if !strings.Contains(proxyColumns, "ipapi_flags") {
 		t.Fatal("proxyColumns constant missing ipapi_flags")
+	}
+	if !strings.Contains(proxyColumns, "ipapi_flags_seen") {
+		t.Fatal("proxyColumns constant missing ipapi_flags_seen")
 	}
 }

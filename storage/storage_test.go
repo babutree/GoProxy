@@ -576,6 +576,31 @@ func TestHealthCheckSuccessResetsFailCount(t *testing.T) {
 	}
 }
 
+func TestAddManualProxiesRollsBackOnPartialFailure(t *testing.T) {
+	store := newTestStorage(t)
+	_, err := store.db.Exec(`
+		CREATE TRIGGER fail_bad_manual_proxy
+		BEFORE INSERT ON proxies
+		WHEN NEW.address = 'manual-bad:8080'
+		BEGIN
+			SELECT RAISE(ABORT, 'forced manual insert failure');
+		END`)
+	if err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+
+	err = store.AddManualProxies([]Proxy{
+		{Address: "manual-good:1080", Protocol: "socks5"},
+		{Address: "manual-bad:8080", Protocol: "http"},
+	}, "us", "atomic")
+	if err == nil {
+		t.Fatal("AddManualProxies() expected error, got nil")
+	}
+	if _, err := store.GetProxyByAddress("manual-good:1080"); err == nil {
+		t.Fatal("manual-good was committed despite later insert failure")
+	}
+}
+
 func testSubscriptionIDForSource(source string) int64 {
 	if source == SourceSubscription {
 		return 1

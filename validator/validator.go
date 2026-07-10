@@ -143,6 +143,9 @@ func queryIPAPIIs(client *http.Client, exitIP string) ipapiIsInfo {
 		return ipapiIsInfo{}
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return ipapiIsInfo{}
+	}
 
 	// abuser_score 返回形如 "0.0039 (Low)" 的字符串，用 string 接收后解析。
 	var raw struct {
@@ -156,6 +159,9 @@ func queryIPAPIIs(client *http.Client, exitIP string) ipapiIsInfo {
 		} `json:"company"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return ipapiIsInfo{}
+	}
+	if strings.TrimSpace(raw.Company.AbuserScore) == "" {
 		return ipapiIsInfo{}
 	}
 

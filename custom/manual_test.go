@@ -109,8 +109,8 @@ func TestAddManualNodeTunnel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CountBySource() error = %v", err)
 	}
-	if count != 1 {
-		t.Fatalf("manual proxies = %d, want 1", count)
+	if count != 2 {
+		t.Fatalf("manual proxies = %d, want 2 (SOCKS5+HTTP)", count)
 	}
 
 	port := m.singbox.GetPortMap()[node.NodeKey()]
@@ -121,6 +121,15 @@ func TestAddManualNodeTunnel(t *testing.T) {
 	}
 	if proxy.Protocol != "socks5" || proxy.Region != "jp" || proxy.Source != storage.SourceManual {
 		t.Fatalf("proxy = %q/%q/%q, want socks5/jp/manual", proxy.Protocol, proxy.Region, proxy.Source)
+	}
+	httpPort := m.singbox.GetHTTPPortMap()[node.NodeKey()]
+	httpAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(httpPort))
+	httpProxy, err := store.GetProxyByAddress(httpAddr)
+	if err != nil {
+		t.Fatalf("GetProxyByAddress(%s) error = %v", httpAddr, err)
+	}
+	if httpProxy.Protocol != "http" || httpProxy.Region != "jp" || httpProxy.Source != storage.SourceManual {
+		t.Fatalf("http proxy = %q/%q/%q, want http/jp/manual", httpProxy.Protocol, httpProxy.Region, httpProxy.Source)
 	}
 }
 

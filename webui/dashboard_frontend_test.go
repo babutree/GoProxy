@@ -18,7 +18,7 @@ func TestDashboardEscapesAPIFieldsBeforeInnerHTML(t *testing.T) {
 		"html(regionOf(p))",
 		// IP 风险分两列：abuserBadge 经 html(n.toFixed(2)) 转义分值，ipapiFlagsBadges 经 html(f) 转义标记。
 		"abuserBadge(p.ipapiis_score)",
-		"ipapiFlagsBadges(p.ipapi_flags,!!p.exit_ip)",
+		"ipapiFlagsBadges(p.ipapi_flags,!!p.ipapi_flags_seen)",
 		"html(sub.name)",
 		"html(activeCount)",
 		"html(pausedCount)",
@@ -63,12 +63,12 @@ func TestDashboardRiskColumnsAndBadges(t *testing.T) {
 		"<td colspan=\"10\" class=\"empty\">没有匹配节点</td>",
 		// abuserBadge：<0 显示 "--"，否则两位小数 + 三色阈值(0.1/0.5)。
 		"function abuserBadge(score){const n=Number(score);if(!Number.isFinite(n)||n<0)return '<span class=\"muted\">--</span>';const cls=n<0.1?'ok':(n<=0.5?'warn':'danger');return '<span class=\"badge '+cls+'\">'+html(n.toFixed(2))+'</span>'}",
-		// ipapiFlagsBadges：空+已探测显"干净"、空+未探测显"--"、命中按类型着色。
-		"function ipapiFlagsBadges(flags,probed){",
-		"return probed?'<span class=\"badge ok\">干净</span>':'<span class=\"muted\">--</span>'",
-		// 行渲染分别引用两列字段；ip-api 探测状态用 exit_ip 是否非空判定。
+		// ipapiFlagsBadges：空+seen 显"干净"、空+未探测显"--"、命中按类型着色。
+		"function ipapiFlagsBadges(flags,seen){",
+		"return seen?'<span class=\"badge ok\">干净</span>':'<span class=\"muted\">--</span>'",
+		// 行渲染分别引用两列字段；ip-api 探测状态用 ipapi_flags_seen 判定。
 		"abuserBadge(p.ipapiis_score)",
-		"ipapiFlagsBadges(p.ipapi_flags,!!p.exit_ip)",
+		"ipapiFlagsBadges(p.ipapi_flags,!!p.ipapi_flags_seen)",
 	}
 	for _, check := range checks {
 		t.Run(check, func(t *testing.T) {

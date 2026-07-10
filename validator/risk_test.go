@@ -1,6 +1,11 @@
 package validator
 
-import "testing"
+import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
 
 // TestParseAbuserScore 覆盖 ipapi.is abuser_score 字符串解析：正常值、带标签、空、越界裁剪、非法。
 func TestParseAbuserScore(t *testing.T) {
@@ -14,9 +19,9 @@ func TestParseAbuserScore(t *testing.T) {
 		{"0", 0},
 		{"", 0},
 		{"  0.5  ", 0.5},
-		{"1.7", 1},     // 越界裁剪到 1
-		{"-0.3", 0},    // 负值归零
-		{"abc", 0},     // 非法归零
+		{"1.7", 1},       // 越界裁剪到 1
+		{"-0.3", 0},      // 负值归零
+		{"abc", 0},       // 非法归零
 		{"(Unknown)", 0}, // 无前导数值
 	}
 	for _, c := range cases {
@@ -56,4 +61,56 @@ func TestUnknownRisk(t *testing.T) {
 	if r.Flags != "" {
 		t.Fatalf("UnknownRisk().Flags = %q, want empty", r.Flags)
 	}
+}
+
+func TestQueryIPAPIIsRejectsNon2xxAndMissingScore(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "http error json", status: http.StatusBadRequest, body: `{"error":"Invalid IP Address"}`},
+		{name: "missing score", status: http.StatusOK, body: `{"is_abuser":true,"company":{}}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(c.status)
+				_, _ = w.Write([]byte(c.body))
+			}))
+			defer server.Close()
+
+			client := server.Client()
+			client.Transport = rewriteIPAPITransport{base: client.Transport, target: server.URL}
+			if got := queryIPAPIIs(client, "203.0.113.1"); got.OK {
+				t.Fatalf("queryIPAPIIs() OK = true for %s, want false", c.name)
+			}
+		})
+	}
+}
+
+func TestQueryIPAPIIsAcceptsValidScore(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"is_abuser":true,"company":{"abuser_score":"0.42 (Medium)"}}`))
+	}))
+	defer server.Close()
+
+	client := server.Client()
+	client.Transport = rewriteIPAPITransport{base: client.Transport, target: server.URL}
+	got := queryIPAPIIs(client, "203.0.113.1")
+	if !got.OK || got.AbuserScore != 0.42 {
+		t.Fatalf("queryIPAPIIs() = OK %v score %v, want true/0.42", got.OK, got.AbuserScore)
+	}
+}
+
+type rewriteIPAPITransport struct {
+	base   http.RoundTripper
+	target string
+}
+
+func (t rewriteIPAPITransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	targetReq := req.Clone(req.Context())
+	targetReq.URL.Scheme = "https"
+	targetReq.URL.Host = strings.TrimPrefix(t.target, "https://")
+	return t.base.RoundTrip(targetReq)
 }
