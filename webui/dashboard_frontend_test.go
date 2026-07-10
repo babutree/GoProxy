@@ -226,6 +226,9 @@ func TestDashboardProxyActionsUseProxyIDAsPrimaryIdentity(t *testing.T) {
 		"JSON.stringify({id,address,note})",
 		"JSON.stringify({id,address})",
 		"JSON.stringify({id,address,enable})",
+		// 单节点测试连通按钮：走 proxy-id 优先身份，调用后端 /api/proxy/refresh。
+		"testProxy('+id+',decodeURIComponent",
+		"await api('/api/proxy/refresh',{method:'POST',body:JSON.stringify({id,address})})",
 	}
 	for _, check := range checks {
 		t.Run(check, func(t *testing.T) {
