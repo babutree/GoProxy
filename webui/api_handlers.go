@@ -185,11 +185,11 @@ func (s *Server) apiRefreshProxy(w http.ResponseWriter, r *http.Request) {
 		v := validator.New(1, cfg.ValidateTimeout, cfg.ValidateURL)
 
 		log.Printf("[webui] refreshing proxy: %s", req.Address)
-		valid, latency, exitIP, exitLocation := v.ValidateOne(*targetProxy)
+		valid, latency, exitIP, exitLocation, risk := v.ValidateOne(*targetProxy)
 
 		if valid {
 			latencyMs := int(latency.Milliseconds())
-			s.storage.UpdateProxyExitInfo(targetProxy.ID, exitIP, exitLocation, latencyMs)
+			s.storage.UpdateProxyExitInfo(targetProxy.ID, exitIP, exitLocation, latencyMs, risk.IPAPIIsScore, risk.Flags)
 			log.Printf("[webui] proxy refreshed: %s latency=%dms grade=%s", targetProxy.Address, latencyMs, storage.CalculateQualityGrade(latencyMs))
 		} else {
 			s.storage.DisableProxyByID(targetProxy.ID)
@@ -225,7 +225,7 @@ func (s *Server) apiRefreshLatency(w http.ResponseWriter, r *http.Request) {
 		for r := range validate.ValidateStream(proxies) {
 			if r.Valid {
 				latencyMs := int(r.Latency.Milliseconds())
-				s.storage.UpdateProxyExitInfo(r.Proxy.ID, r.ExitIP, r.ExitLocation, latencyMs)
+				s.storage.UpdateProxyExitInfo(r.Proxy.ID, r.ExitIP, r.ExitLocation, latencyMs, r.Risk.IPAPIIsScore, r.Risk.Flags)
 				updated++
 			} else {
 				s.storage.DisableProxyByID(r.Proxy.ID)

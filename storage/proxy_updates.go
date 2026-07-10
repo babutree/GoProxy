@@ -80,25 +80,28 @@ func (s *Storage) UpdateLatencyByID(id int64, latencyMs int) error {
 }
 
 // UpdateExitInfo 更新出口信息；自动地域可由验证结果回写，手动地域受保护。
-func (s *Storage) UpdateExitInfo(address, exitIP, exitLocation string, latencyMs int) error {
+func (s *Storage) UpdateExitInfo(address, exitIP, exitLocation string, latencyMs int, ipapiisScore float64, ipapiFlags string) error {
 	if err := s.requireUnambiguousAddress(address); err != nil {
 		return err
 	}
-	return s.updateExitInfoWhere(`address = ?`, []interface{}{address}, exitIP, exitLocation, latencyMs)
+	return s.updateExitInfoWhere(`address = ?`, []interface{}{address}, exitIP, exitLocation, latencyMs, ipapiisScore, ipapiFlags)
 }
 
-func (s *Storage) UpdateProxyExitInfo(id int64, exitIP, exitLocation string, latencyMs int) error {
-	return s.updateExitInfoWhere(`id = ?`, []interface{}{id}, exitIP, exitLocation, latencyMs)
+func (s *Storage) UpdateProxyExitInfo(id int64, exitIP, exitLocation string, latencyMs int, ipapiisScore float64, ipapiFlags string) error {
+	return s.updateExitInfoWhere(`id = ?`, []interface{}{id}, exitIP, exitLocation, latencyMs, ipapiisScore, ipapiFlags)
 }
 
-func (s *Storage) UpdateSubscriptionProxyExitInfo(address string, subscriptionID int64, exitIP, exitLocation string, latencyMs int) error {
-	return s.updateExitInfoWhere(`address = ? AND source = ? AND subscription_id = ?`, []interface{}{address, SourceSubscription, subscriptionID}, exitIP, exitLocation, latencyMs)
+func (s *Storage) UpdateSubscriptionProxyExitInfo(address string, subscriptionID int64, exitIP, exitLocation string, latencyMs int, ipapiisScore float64, ipapiFlags string) error {
+	return s.updateExitInfoWhere(`address = ? AND source = ? AND subscription_id = ?`, []interface{}{address, SourceSubscription, subscriptionID}, exitIP, exitLocation, latencyMs, ipapiisScore, ipapiFlags)
 }
 
-func (s *Storage) updateExitInfoWhere(where string, args []interface{}, exitIP, exitLocation string, latencyMs int) error {
+// updateExitInfoWhere 写回出口信息与两源风险信号。
+// ipapiis_score 仅在 ipapiisScore >= 0 时更新：探测降级/未知(-1)不得覆盖已有有效分。
+// ipapi_flags 随每次成功探测覆盖写入（含空串——空表示本次探测无命中，语义有效）。
+func (s *Storage) updateExitInfoWhere(where string, args []interface{}, exitIP, exitLocation string, latencyMs int, ipapiisScore float64, ipapiFlags string) error {
 	grade := CalculateQualityGrade(latencyMs)
 	region := regionFromExitLocation(exitLocation)
-	queryArgs := []interface{}{exitIP, exitLocation, latencyMs, grade, region, region}
+	queryArgs := []interface{}{exitIP, exitLocation, latencyMs, grade, region, region, ipapiisScore, ipapiisScore, ipapiFlags}
 	queryArgs = append(queryArgs, args...)
 	// 健康检查/验证成功时同样清零 fail_count（BUG-53）：只有到达此处才代表
 	// 探测通过，之前累积的失败应清除，节点方能重新参与选路/后续检查。
@@ -107,7 +110,9 @@ func (s *Storage) updateExitInfoWhere(where string, args []interface{}, exitIP, 
 	res, err := s.db.Exec(
 		`UPDATE proxies
 		 SET exit_ip = ?, exit_location = ?, latency = ?, quality_grade = ?, fail_count = 0,
-		     region = CASE WHEN region_source != 'manual' AND ? != '' THEN ? ELSE region END
+		     region = CASE WHEN region_source != 'manual' AND ? != '' THEN ? ELSE region END,
+		     ipapiis_score = CASE WHEN ? >= 0 THEN ? ELSE ipapiis_score END,
+		     ipapi_flags = ?
 		 WHERE `+where,
 		queryArgs...,
 	)

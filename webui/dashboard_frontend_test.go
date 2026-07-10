@@ -16,6 +16,9 @@ func TestDashboardEscapesAPIFieldsBeforeInnerHTML(t *testing.T) {
 		"html(p.exit_ip)",
 		"html(sourceLabel(p))",
 		"html(regionOf(p))",
+		// IP 风险分两列：abuserBadge 经 html(n.toFixed(2)) 转义分值，ipapiFlagsBadges 经 html(f) 转义标记。
+		"abuserBadge(p.ipapiis_score)",
+		"ipapiFlagsBadges(p.ipapi_flags,!!p.exit_ip)",
 		"html(sub.name)",
 		"html(activeCount)",
 		"html(pausedCount)",
@@ -42,6 +45,49 @@ func TestDashboardEscapesAPIFieldsBeforeInnerHTML(t *testing.T) {
 		t.Run("reject "+unsafe, func(t *testing.T) {
 			if strings.Contains(dashboardHTML, unsafe) {
 				t.Fatalf("dashboardHTML still contains unsafe innerHTML pattern %q", unsafe)
+			}
+		})
+	}
+}
+
+// TestDashboardRiskColumnsAndBadges 验证 IP 风险分两列（分源展示不聚合）：
+// 表头含 ipapi.is 滥用分列与 ip-api 标记列、colspan 为 10、abuserBadge 阈值逻辑、
+// ipapiFlagsBadges 标记着色/干净/未探测逻辑、行渲染分别引用两列字段。
+func TestDashboardRiskColumnsAndBadges(t *testing.T) {
+	checks := []string{
+		// 表头两列（ipapi.is 分数 + ip-api 标记）。
+		"ipapi.is 滥用分",
+		"<th>ip-api 标记</th>",
+		// 两处 colspan 为 10（加载中 + 无匹配节点）。
+		"<td colspan=\"10\" class=\"empty\">加载中</td>",
+		"<td colspan=\"10\" class=\"empty\">没有匹配节点</td>",
+		// abuserBadge：<0 显示 "--"，否则两位小数 + 三色阈值(0.1/0.5)。
+		"function abuserBadge(score){const n=Number(score);if(!Number.isFinite(n)||n<0)return '<span class=\"muted\">--</span>';const cls=n<0.1?'ok':(n<=0.5?'warn':'danger');return '<span class=\"badge '+cls+'\">'+html(n.toFixed(2))+'</span>'}",
+		// ipapiFlagsBadges：空+已探测显"干净"、空+未探测显"--"、命中按类型着色。
+		"function ipapiFlagsBadges(flags,probed){",
+		"return probed?'<span class=\"badge ok\">干净</span>':'<span class=\"muted\">--</span>'",
+		// 行渲染分别引用两列字段；ip-api 探测状态用 exit_ip 是否非空判定。
+		"abuserBadge(p.ipapiis_score)",
+		"ipapiFlagsBadges(p.ipapi_flags,!!p.exit_ip)",
+	}
+	for _, check := range checks {
+		t.Run(check, func(t *testing.T) {
+			if !strings.Contains(dashboardHTML, check) {
+				t.Fatalf("dashboardHTML missing risk-columns invariant %q", check)
+			}
+		})
+	}
+
+	// 回归防护：旧的单列聚合模型（riskBadge/risk_score/9 列 colspan）不应再残留。
+	for _, unsafe := range []string{
+		"riskBadge(p.risk_score)",
+		"<th>IP 风险分</th>",
+		"<td colspan=\"9\" class=\"empty\">加载中</td>",
+		"<td colspan=\"9\" class=\"empty\">没有匹配节点</td>",
+	} {
+		t.Run("reject "+unsafe, func(t *testing.T) {
+			if strings.Contains(dashboardHTML, unsafe) {
+				t.Fatalf("dashboardHTML still has stale aggregated risk model %q", unsafe)
 			}
 		})
 	}

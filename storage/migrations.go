@@ -48,6 +48,8 @@ func (s *Storage) migrateRequiredProxyColumns() error {
 		{name: "user_paused", sql: `ALTER TABLE proxies ADD COLUMN user_paused INTEGER NOT NULL DEFAULT 0`},
 		{name: "source", sql: `ALTER TABLE proxies ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'`},
 		{name: "subscription_id", sql: `ALTER TABLE proxies ADD COLUMN subscription_id INTEGER NOT NULL DEFAULT 0`},
+		{name: "ipapiis_score", sql: `ALTER TABLE proxies ADD COLUMN ipapiis_score REAL NOT NULL DEFAULT -1`},
+		{name: "ipapi_flags", sql: `ALTER TABLE proxies ADD COLUMN ipapi_flags TEXT NOT NULL DEFAULT ''`},
 	}
 
 	for _, column := range columns {
@@ -152,7 +154,9 @@ func (s *Storage) rebuildProxiesWithoutAddressUnique() error {
 			status          TEXT NOT NULL DEFAULT 'active',
 			user_paused     INTEGER NOT NULL DEFAULT 0,
 			source          TEXT NOT NULL DEFAULT 'manual',
-			subscription_id INTEGER NOT NULL DEFAULT 0
+			subscription_id INTEGER NOT NULL DEFAULT 0,
+			ipapiis_score   REAL NOT NULL DEFAULT -1,
+			ipapi_flags     TEXT NOT NULL DEFAULT ''
 		)`); err != nil {
 		return fmt.Errorf("create proxies_new: %w", err)
 	}
@@ -160,11 +164,11 @@ func (s *Storage) rebuildProxiesWithoutAddressUnique() error {
 		INSERT INTO proxies_new (
 			id, address, protocol, region, region_source, note, exit_ip, exit_location,
 			latency, quality_grade, use_count, success_count, fail_count, last_used,
-			last_check, created_at, status, user_paused, source, subscription_id
+			last_check, created_at, status, user_paused, source, subscription_id, ipapiis_score, ipapi_flags
 		)
 		SELECT id, address, protocol, region, region_source, note, exit_ip, exit_location,
 			latency, quality_grade, use_count, success_count, fail_count, last_used,
-			last_check, created_at, status, user_paused, source, subscription_id
+			last_check, created_at, status, user_paused, source, subscription_id, ipapiis_score, ipapi_flags
 		FROM proxies`); err != nil {
 		return fmt.Errorf("copy proxies_new: %w", err)
 	}

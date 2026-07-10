@@ -30,6 +30,9 @@ type Proxy struct {
 	UserPaused     bool      `json:"user_paused"`
 	Source         string    `json:"source"`          // "subscription" 订阅节点或 "manual" 手动节点
 	SubscriptionID int64     `json:"subscription_id"` // 所属订阅ID（0=手动节点）
+	// IP 风险信号：两源分开展示、不聚合。
+	IPAPIIsScore float64 `json:"ipapiis_score"` // ipapi.is abuser_score（0-1，越高越危险）；-1 表示未探测/查询失败
+	IPAPIFlags   string  `json:"ipapi_flags"`   // ip-api 命中标记逗号拼接（proxy/hosting/mobile）；空=干净或未探测
 }
 
 // Subscription 订阅信息
@@ -96,7 +99,9 @@ func (s *Storage) initSchema() error {
 			status         TEXT NOT NULL DEFAULT 'active',
 			user_paused    INTEGER NOT NULL DEFAULT 0,
 			source         TEXT NOT NULL DEFAULT 'manual',
-			subscription_id INTEGER NOT NULL DEFAULT 0
+			subscription_id INTEGER NOT NULL DEFAULT 0,
+			ipapiis_score  REAL NOT NULL DEFAULT -1,
+			ipapi_flags    TEXT NOT NULL DEFAULT ''
 		)
 	`)
 	if err != nil {

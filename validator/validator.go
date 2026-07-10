@@ -66,14 +66,26 @@ type Result struct {
 	Latency      time.Duration
 	ExitIP       string
 	ExitLocation string
+	Risk         RiskInfo // 两源风险信号：ipapi.is 分数 + ip-api 命中标记，分开展示不聚合
 }
 
-// getExitIPInfo 通过代理获取出口 IP 和地理位置
-func getExitIPInfo(client *http.Client) (string, string) {
-	// 使用 ip-api.com 返回 JSON 格式的 IP 信息
-	resp, err := client.Get("http://ip-api.com/json/?fields=status,country,countryCode,city,query")
+// ipAPIInfo 是 ip-api.com 返回的出口信息（含风险信号）。
+type ipAPIInfo struct {
+	IP       string
+	Location string
+	Proxy    bool // proxy=true：VPN/代理/Tor 出口
+	Hosting  bool // hosting=true：数据中心/托管
+	Mobile   bool // mobile=true：移动网络
+	OK       bool // 查询是否成功
+}
+
+// getExitIPInfo 通过代理获取出口 IP、地理位置及风险信号（proxy/hosting/mobile）。
+// 使用 ip-api.com，fields 扩展 proxy,hosting,mobile 以支持风险分派生。
+func getExitIPInfo(client *http.Client) ipAPIInfo {
+	// 扩展 fields：新增 proxy,hosting,mobile 用于风险评估。
+	resp, err := client.Get("http://ip-api.com/json/?fields=status,country,countryCode,city,query,proxy,hosting,mobile")
 	if err != nil {
-		return "", ""
+		return ipAPIInfo{}
 	}
 	defer resp.Body.Close()
 
@@ -83,10 +95,13 @@ func getExitIPInfo(client *http.Client) (string, string) {
 		Country     string `json:"country"`
 		CountryCode string `json:"countryCode"`
 		City        string `json:"city"`
+		Proxy       bool   `json:"proxy"`
+		Hosting     bool   `json:"hosting"`
+		Mobile      bool   `json:"mobile"`
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil || result.Status != "success" {
-		return "", ""
+		return ipAPIInfo{}
 	}
 
 	// 返回格式：IP, "国家代码 城市"
@@ -95,7 +110,80 @@ func getExitIPInfo(client *http.Client) (string, string) {
 		location = fmt.Sprintf("%s %s", result.CountryCode, result.City)
 	}
 
-	return result.Query, location
+	return ipAPIInfo{
+		IP:       result.Query,
+		Location: location,
+		Proxy:    result.Proxy,
+		Hosting:  result.Hosting,
+		Mobile:   result.Mobile,
+		OK:       true,
+	}
+}
+
+// ipapiIsInfo 是 ipapi.is 返回的风险信号。
+type ipapiIsInfo struct {
+	Datacenter  bool
+	VPN         bool
+	Proxy       bool
+	Tor         bool
+	Abuser      bool
+	AbuserScore float64 // 已解析的归一化滥用分（0-1）
+	OK          bool
+}
+
+// queryIPAPIIs 经同一 proxy client 请求 ipapi.is，显式指定出口 IP (?q=<exitIP>)，
+// 确保查到的是节点出口 IP 而非网关自身 IP。exitIP 由 ip-api 已先行取得。
+// 查询失败/超时/解析失败时返回 OK=false，供上层降级。
+func queryIPAPIIs(client *http.Client, exitIP string) ipapiIsInfo {
+	if exitIP == "" {
+		return ipapiIsInfo{}
+	}
+	resp, err := client.Get("https://api.ipapi.is/?q=" + url.QueryEscape(exitIP))
+	if err != nil {
+		return ipapiIsInfo{}
+	}
+	defer resp.Body.Close()
+
+	// abuser_score 返回形如 "0.0039 (Low)" 的字符串，用 string 接收后解析。
+	var raw struct {
+		IsDatacenter bool `json:"is_datacenter"`
+		IsVPN        bool `json:"is_vpn"`
+		IsProxy      bool `json:"is_proxy"`
+		IsTor        bool `json:"is_tor"`
+		IsAbuser     bool `json:"is_abuser"`
+		Company      struct {
+			AbuserScore string `json:"abuser_score"`
+		} `json:"company"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return ipapiIsInfo{}
+	}
+
+	return ipapiIsInfo{
+		Datacenter:  raw.IsDatacenter,
+		VPN:         raw.IsVPN,
+		Proxy:       raw.IsProxy,
+		Tor:         raw.IsTor,
+		Abuser:      raw.IsAbuser,
+		AbuserScore: parseAbuserScore(raw.Company.AbuserScore),
+		OK:          true,
+	}
+}
+
+// assessRisk 收集两源风险信号，分开返回（不聚合）：
+//   - ip-api 的 proxy/hosting/mobile 命中标记（来自已取得的 ipInfo）
+//   - ipapi.is 的 abuser_score（经同一 client 走节点代理请求；失败则记 IPAPIIsUnknown）
+func assessRisk(client *http.Client, ipInfo ipAPIInfo) RiskInfo {
+	risk := RiskInfo{IPAPIIsScore: IPAPIIsUnknown}
+	if ipInfo.OK {
+		risk.Flags = ipapiFlags(ipInfo.Proxy, ipInfo.Hosting, ipInfo.Mobile)
+	}
+	if ipInfo.OK && ipInfo.IP != "" {
+		if is := queryIPAPIIs(client, ipInfo.IP); is.OK {
+			risk.IPAPIIsScore = is.AbuserScore
+		}
+	}
+	return risk
 }
 
 // HTTPS 测试目标列表，随机选一个验证代理的 CONNECT 隧道能力
@@ -166,8 +254,8 @@ func (v *Validator) ValidateStream(proxies []storage.Proxy) <-chan Result {
 			go func(px storage.Proxy) {
 				defer wg.Done()
 				defer func() { <-sem }()
-				valid, latency, exitIP, exitLocation := v.ValidateOne(px)
-				ch <- Result{Proxy: px, Valid: valid, Latency: latency, ExitIP: exitIP, ExitLocation: exitLocation}
+				valid, latency, exitIP, exitLocation, risk := v.ValidateOne(px)
+				ch <- Result{Proxy: px, Valid: valid, Latency: latency, ExitIP: exitIP, ExitLocation: exitLocation, Risk: risk}
 			}(p)
 		}
 		wg.Wait()
@@ -177,8 +265,10 @@ func (v *Validator) ValidateStream(proxies []storage.Proxy) <-chan Result {
 	return ch
 }
 
-// ValidateOne 验证单个代理是否可用，返回是否有效、延迟、出口IP和地理位置
-func (v *Validator) ValidateOne(p storage.Proxy) (bool, time.Duration, string, string) {
+// ValidateOne 验证单个代理是否可用，返回是否有效、延迟、出口IP、地理位置和 IP 风险信号。
+// 风险信号：验证通过路径经同一 proxy client 分别探测 ip-api.com（命中标记）与 ipapi.is（滥用分），
+// 两源分开不聚合；未走到风险探测的失败路径统一返回 UnknownRisk()。
+func (v *Validator) ValidateOne(p storage.Proxy) (bool, time.Duration, string, string, RiskInfo) {
 	var client *http.Client
 	var err error
 
@@ -189,44 +279,48 @@ func (v *Validator) ValidateOne(p storage.Proxy) (bool, time.Duration, string, s
 		client, err = newSOCKS5Client(p.Address, v.timeout)
 	default:
 		log.Printf("unknown protocol %s for %s", p.Protocol, p.Address)
-		return false, 0, "", ""
+		return false, 0, "", "", UnknownRisk()
 	}
 
 	if err != nil {
-		return false, 0, "", ""
+		return false, 0, "", "", UnknownRisk()
 	}
 
 	latency, ok := v.validateConnectivity(client)
 	if !ok {
-		return false, latency, "", ""
+		return false, latency, "", "", UnknownRisk()
 	}
 
 	// 响应时间过滤
 	if v.maxResponseMs > 0 && latency > time.Duration(v.maxResponseMs)*time.Millisecond {
-		return false, latency, "", ""
+		return false, latency, "", "", UnknownRisk()
 	}
 
 	// 获取出口 IP 和地理位置（仅在验证通过时）
-	exitIP, exitLocation := getExitIPInfo(client)
+	ipInfo := getExitIPInfo(client)
+	exitIP, exitLocation := ipInfo.IP, ipInfo.Location
 
 	// 必须能获取到出口信息
 	if exitIP == "" || exitLocation == "" {
-		return false, latency, exitIP, exitLocation
+		return false, latency, exitIP, exitLocation, UnknownRisk()
 	}
 
 	// 地理过滤：白名单优先，否则走黑名单
 	if len(exitLocation) >= 2 && !v.passesGeoFilter(exitLocation[:2]) {
-		return false, latency, exitIP, exitLocation
+		return false, latency, exitIP, exitLocation, UnknownRisk()
 	}
 
 	// HTTP 代理额外检测：必须支持 HTTPS CONNECT 隧道
 	if p.Protocol == "http" {
 		if !checkHTTPSConnect(p.Address, v.timeout) {
-			return false, latency, exitIP, exitLocation
+			return false, latency, exitIP, exitLocation, UnknownRisk()
 		}
 	}
 
-	return true, latency, exitIP, exitLocation
+	// 风险信号探测：经同一 proxy client 分别取两源；出口 IP 已从 ip-api 取得。
+	risk := assessRisk(client, ipInfo)
+
+	return true, latency, exitIP, exitLocation, risk
 }
 
 // passesGeoFilter 依据白/黑名单判断某国家代码是否通过地理过滤。
