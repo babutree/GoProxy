@@ -1,7 +1,7 @@
 package storage
 
 func (s *Storage) AddManualProxy(address, protocol, region, note string) error {
-	region = normalizeRegion(region)
+	region = normalizeManualRegion(region)
 	regionSource := "auto"
 	if region != "" {
 		regionSource = "manual"
@@ -26,7 +26,7 @@ func (s *Storage) UpdateProxyRegion(address, region string, manual bool) error {
 	}
 	res, err := s.db.Exec(
 		`UPDATE proxies SET region = ?, region_source = ? WHERE address = ?`,
-		normalizeRegion(region), regionSource, address,
+		normalizeManualRegion(region), regionSource, address,
 	)
 	if err != nil {
 		return err
@@ -41,7 +41,7 @@ func (s *Storage) UpdateProxyRegionByID(id int64, region string, manual bool) er
 	}
 	res, err := s.db.Exec(
 		`UPDATE proxies SET region = ?, region_source = ? WHERE id = ?`,
-		normalizeRegion(region), regionSource, id,
+		normalizeManualRegion(region), regionSource, id,
 	)
 	if err != nil {
 		return err

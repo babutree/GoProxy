@@ -86,10 +86,36 @@ func (n *ParsedNode) DirectProtocol() string {
 	return "http"
 }
 
-// Parse 解析订阅内容（全自动检测格式）
+// Parse 解析订阅内容。
+// format 显式指定时作为"快速路径"提示直接走对应解析器；为空 / "auto" 时走自动检测。
+// 显式格式解析失败或无节点时回退自动检测，确保是旧行为（始终 autodetect）的超集，不回归历史调用方。
 func Parse(data []byte, format string) ([]ParsedNode, error) {
-	// 无论用户选择什么格式，都走自动检测
-	return parseAutoDetect(data)
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "singbox", "sing-box":
+		// sing-box JSON 无现有调用方，直接返回其结果（含可诊断错误）。
+		return parseSingBoxJSON(data)
+	case "clash":
+		if nodes, err := parseClash(data); err == nil && len(nodes) > 0 {
+			return nodes, nil
+		}
+		return parseAutoDetect(data)
+	case "base64":
+		if nodes, err := parseBase64(data); err == nil && len(nodes) > 0 {
+			return nodes, nil
+		}
+		return parseAutoDetect(data)
+	case "links":
+		content := strings.TrimSpace(string(data))
+		if looksLikeProxyLinks(content) {
+			if nodes, err := parseProxyLinks(content); err == nil && len(nodes) > 0 {
+				return nodes, nil
+			}
+		}
+		return parseAutoDetect(data)
+	default:
+		// ""、"auto"、"plain" 及未知值 → 自动检测（与历史行为一致）。
+		return parseAutoDetect(data)
+	}
 }
 
 // ParseSingleLink 解析单个节点链接，复用已有的协议链接 / 纯文本解析逻辑。
@@ -120,6 +146,17 @@ func parseAutoDetect(data []byte) ([]ParsedNode, error) {
 	content := strings.TrimSpace(string(data))
 	log.Printf("[custom] 自动检测格式: 内容长度=%d", len(content))
 
+	// BUG-63: 空内容单独报错。
+	if content == "" {
+		return nil, fmt.Errorf("订阅内容为空")
+	}
+
+	// BUG-59/60: JSON 分支——以 { 开头判定为 JSON（如 sing-box 配置）。
+	if strings.HasPrefix(content, "{") {
+		log.Println("[custom] 检测到 JSON 格式，尝试按 sing-box 配置解析")
+		return parseSingBoxJSON(data)
+	}
+
 	// 1. 尝试 Clash YAML
 	if looksLikeYAML(content) {
 		log.Println("[custom] 检测到 Clash YAML 格式")
@@ -139,7 +176,9 @@ func parseAutoDetect(data []byte) ([]ParsedNode, error) {
 	// 3. 尝试 Base64 解码
 	decoded, err := tryBase64Decode(content)
 	if err != nil {
-		return nil, fmt.Errorf("无法识别订阅内容格式（非 YAML / 非协议链接 / 非 Base64）")
+		// BUG-63: 区分 base64 失败与其他不可识别情况，给可诊断（脱敏）消息。
+		return nil, fmt.Errorf("无法识别订阅内容格式（非 JSON / 非 YAML / 非协议链接 / 非 Base64），内容预览: %s",
+			safePreview(content, singleLinkPreviewLen))
 	}
 
 	decodedStr := strings.TrimSpace(string(decoded))
@@ -147,6 +186,12 @@ func parseAutoDetect(data []byte) ([]ParsedNode, error) {
 		return nil, fmt.Errorf("Base64 解码后内容为空")
 	}
 	log.Printf("[custom] Base64 解码成功: %d bytes", len(decoded))
+
+	// 解码后是 JSON（sing-box）？
+	if strings.HasPrefix(decodedStr, "{") {
+		log.Println("[custom] Base64 解码后为 JSON 格式，尝试按 sing-box 配置解析")
+		return parseSingBoxJSON(decoded)
+	}
 
 	// 解码后是 YAML？
 	if looksLikeYAML(decodedStr) {
@@ -166,7 +211,7 @@ func parseAutoDetect(data []byte) ([]ParsedNode, error) {
 		return nodes, nil
 	}
 
-	return nil, fmt.Errorf("无法识别订阅内容格式")
+	return nil, fmt.Errorf("无法识别订阅内容格式（Base64 解码后既非 JSON / YAML / 协议链接 / 有效纯文本）")
 }
 
 func safePreview(s string, n int) string {

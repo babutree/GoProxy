@@ -164,6 +164,23 @@ func normalizeProtocol(protocol string) string {
 	return strings.ToLower(strings.TrimSpace(protocol))
 }
 
+// normalizeManualRegion 规范化用户手动输入的 region：小写去空白后，必须匹配
+// alpha2（两位字母），否则视为「未知地域/自动」返回 ""（与既有 region="" 语义一致）。
+// 用于手动节点写入入口（AddManualProxy / UpdateProxyRegion / UpdateProxyRegionByID），
+// 作为前端转义之外的后端兜底，防止恶意客户端绕过前端直接写入非法 region（如 <script>）。
+//
+// 不复用/不改动 normalizeRegion：后者被 GetByRegion 查询过滤及
+// DisableBlockedCountries / DisableNotAllowedCountries 复用，那些路径依赖保留
+// 非 alpha2 原值——若在 normalizeRegion 里把非法值改成空串，disable 路径的
+// region = '' 会误匹配所有 region 为空（auto 地域未知）的节点，造成大范围误禁。
+func normalizeManualRegion(region string) string {
+	normalized := normalizeRegion(region)
+	if !alpha2RegionPattern.MatchString(normalized) {
+		return ""
+	}
+	return normalized
+}
+
 func regionFromExitLocation(exitLocation string) string {
 	fields := strings.Fields(exitLocation)
 	if len(fields) == 0 || !alpha2RegionPattern.MatchString(fields[0]) {

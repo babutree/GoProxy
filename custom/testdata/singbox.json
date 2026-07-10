@@ -1,0 +1,102 @@
+{
+  "log": { "level": "info", "timestamp": true },
+  "dns": {
+    "servers": [
+      { "tag": "proxy-dns", "type": "https", "server": "8.8.8.8", "detour": "选择出口" },
+      { "tag": "local-dns", "type": "udp", "server": "223.5.5.5" }
+    ],
+    "final": "proxy-dns"
+  },
+  "inbounds": [
+    { "type": "tun", "address": ["172.19.0.1/30"], "auto_route": true }
+  ],
+  "outbounds": [
+    {
+      "type": "selector",
+      "tag": "选择出口",
+      "outbounds": [
+        "US-East Los Angeles-42816513-tyte",
+        "NL-Meppel-h-7122721-tuqg",
+        "DE-Frankfurt am Main-h-12442539-tuyl",
+        "US-Columbus-h-11916410-teuz",
+        "US-New York City-6146591-tyqu",
+        "HK-Hong Kong-194331-txlu",
+        "SG-Singapore-trojan-01"
+      ]
+    },
+    {
+      "type": "vless",
+      "tag": "US-East Los Angeles-42816513-tyte",
+      "server": "node1.example.com",
+      "server_port": 8880,
+      "uuid": "00000000-0000-4000-8000-000000000001",
+      "transport": {
+        "type": "ws",
+        "path": "/path1",
+        "headers": { "Host": "host1.example.com" }
+      }
+    },
+    {
+      "type": "vless",
+      "tag": "NL-Meppel-h-7122721-tuqg",
+      "server": "node48.example.com",
+      "server_port": 443,
+      "uuid": "00000000-0000-4000-8000-000000000048",
+      "flow": "xtls-rprx-vision",
+      "tls": {
+        "enabled": true,
+        "server_name": "sni48.example.com",
+        "utls": { "enabled": true, "fingerprint": "firefox" },
+        "reality": {
+          "enabled": true,
+          "public_key": "FAKEPUBLICKEY48",
+          "short_id": "00000030"
+        }
+      }
+    },
+    {
+      "type": "vless",
+      "tag": "DE-Frankfurt am Main-h-12442539-tuyl",
+      "server": "node41.example.com",
+      "server_port": 2053,
+      "uuid": "00000000-0000-4000-8000-000000000041",
+      "transport": {
+        "type": "grpc",
+        "service_name": "media.session.poll"
+      }
+    },
+    {
+      "type": "shadowsocks",
+      "tag": "US-Columbus-h-11916410-teuz",
+      "server": "node23.example.com",
+      "server_port": 443,
+      "method": "aes-256-cfb",
+      "password": "test-password-23"
+    },
+    {
+      "type": "http",
+      "tag": "US-New York City-6146591-tyqu",
+      "server": "node2.example.com",
+      "server_port": 9002,
+      "tls": { "enabled": true, "insecure": true }
+    },
+    {
+      "type": "socks",
+      "tag": "HK-Hong Kong-194331-txlu",
+      "server": "node5.example.com",
+      "server_port": 30001
+    },
+    {
+      "type": "trojan",
+      "tag": "SG-Singapore-trojan-01",
+      "server": "node7.example.com",
+      "server_port": 443,
+      "password": "test-password-7",
+      "tls": { "enabled": true, "server_name": "sni7.example.com" }
+    },
+    {
+      "type": "direct",
+      "tag": "direct-out"
+    }
+  ]
+}
