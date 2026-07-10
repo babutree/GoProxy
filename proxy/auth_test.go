@@ -62,6 +62,37 @@ func TestSocks5AuthParsesDSLAndAuthenticatesBaseUsername(t *testing.T) {
 	}
 }
 
+func TestSocks5AuthAcceptsHashOnlyProxyPassword(t *testing.T) {
+	client, serverConn := net.Pipe()
+	defer client.Close()
+	defer serverConn.Close()
+
+	cfg := authTestConfig()
+	cfg.ProxyAuthPassword = ""
+	server := NewSOCKS5(nil, cfg, ":0")
+	done := make(chan authResult, 1)
+	go func() {
+		parsed, err := server.socks5Auth(serverConn)
+		done <- authResult{parsed: parsed, err: err}
+	}()
+
+	writeSocks5Auth(t, client, "proxy-region-jp-session-y", "secret")
+	reader := bufio.NewReader(client)
+	status, err := reader.ReadByte()
+	if err != nil {
+		t.Fatalf("read auth version: %v", err)
+	}
+	code, err := reader.ReadByte()
+	if err != nil {
+		t.Fatalf("read auth status: %v", err)
+	}
+	result := <-done
+
+	if status != 0x01 || code != 0x00 || result.err != nil {
+		t.Fatalf("hash-only auth reply = [%#x %#x], err = %v", status, code, result.err)
+	}
+}
+
 type authResult struct {
 	parsed auth.ParsedUsername
 	err    error

@@ -54,17 +54,17 @@ func (c *Checker) run() {
 			valid++
 			latencyMs := int(r.Latency.Milliseconds())
 			if r.ExitIP != "" && r.ExitLocation != "" {
-				if err := c.storage.UpdateExitInfo(r.Proxy.Address, r.ExitIP, r.ExitLocation, latencyMs); err != nil {
+				if err := c.storage.UpdateProxyExitInfo(r.Proxy.ID, r.ExitIP, r.ExitLocation, latencyMs); err != nil {
 					log.Printf("[checker] update exit info error: %v", err)
 				}
 			} else if r.Latency > 0 {
-				if err := c.storage.UpdateLatency(r.Proxy.Address, latencyMs); err != nil {
+				if err := c.storage.UpdateLatencyByID(r.Proxy.ID, latencyMs); err != nil {
 					log.Printf("[checker] update latency error: %v", err)
 				}
 			}
 		} else {
 			invalid++
-			if err := c.storage.DisableProxy(r.Proxy.Address); err != nil {
+			if err := c.storage.DisableProxyByID(r.Proxy.ID); err != nil {
 				log.Printf("[checker] disable error: %v", err)
 			}
 		}

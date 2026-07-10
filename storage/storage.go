@@ -27,6 +27,7 @@ type Proxy struct {
 	LastCheck      time.Time `json:"last_check"`
 	CreatedAt      time.Time `json:"created_at"`
 	Status         string    `json:"status"`
+	UserPaused     bool      `json:"user_paused"`
 	Source         string    `json:"source"`          // "subscription" 订阅节点或 "manual" 手动节点
 	SubscriptionID int64     `json:"subscription_id"` // 所属订阅ID（0=手动节点）
 }
@@ -77,7 +78,7 @@ func (s *Storage) initSchema() error {
 	_, err := s.db.Exec(`
 		CREATE TABLE IF NOT EXISTS proxies (
 			id             INTEGER PRIMARY KEY AUTOINCREMENT,
-			address        TEXT NOT NULL UNIQUE,
+			address        TEXT NOT NULL,
 			protocol       TEXT NOT NULL,
 			region         TEXT NOT NULL DEFAULT '',
 			region_source  TEXT NOT NULL DEFAULT '',
@@ -93,6 +94,7 @@ func (s *Storage) initSchema() error {
 			last_check     DATETIME,
 			created_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			status         TEXT NOT NULL DEFAULT 'active',
+			user_paused    INTEGER NOT NULL DEFAULT 0,
 			source         TEXT NOT NULL DEFAULT 'manual',
 			subscription_id INTEGER NOT NULL DEFAULT 0
 		)
@@ -100,12 +102,6 @@ func (s *Storage) initSchema() error {
 	if err != nil {
 		return err
 	}
-
-	// 创建索引
-	s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_protocol_latency ON proxies(protocol, latency)`)
-	s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_quality_grade ON proxies(quality_grade, latency)`)
-	s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_status ON proxies(status)`)
-	s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_region_status_latency ON proxies(region, status, latency)`)
 
 	// 旧公共源断路器表不再服务 geo gateway，显式删除以避免继续依赖公共源状态。
 	_, err = s.db.Exec(`DROP TABLE IF EXISTS source_status`)
@@ -192,7 +188,6 @@ func (s *Storage) initSchema() error {
 	if _, err = s.db.Exec(`UPDATE proxies SET source = ? WHERE source = ?`, SourceSubscription, legacySourceCustom); err != nil {
 		return fmt.Errorf("migrate proxy source values: %w", err)
 	}
-	s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_source ON proxies(source, status)`)
 
 	// 迁移：添加 subscription_id 字段
 	var hasSubID int
@@ -205,6 +200,9 @@ func (s *Storage) initSchema() error {
 		return err
 	}
 	if err := s.migrateProxyGeoColumns(); err != nil {
+		return err
+	}
+	if err := s.rebuildProxiesWithoutAddressUnique(); err != nil {
 		return err
 	}
 
@@ -237,6 +235,38 @@ func (s *Storage) initSchema() error {
 	s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('subscriptions') WHERE name='last_success'`).Scan(&hasLastSuccess)
 	if hasLastSuccess == 0 {
 		s.db.Exec(`ALTER TABLE subscriptions ADD COLUMN last_success DATETIME`)
+	}
+	if err := s.migrateSubscriptionIdentity(); err != nil {
+		return err
+	}
+	if err := s.migrateProxyIdentity(); err != nil {
+		return err
+	}
+
+	// 创建索引
+	if _, err = s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_protocol_latency ON proxies(protocol, latency)`); err != nil {
+		return err
+	}
+	if _, err = s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_quality_grade ON proxies(quality_grade, latency)`); err != nil {
+		return err
+	}
+	if _, err = s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_status ON proxies(status)`); err != nil {
+		return err
+	}
+	if _, err = s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_region_status_latency ON proxies(region, status, latency)`); err != nil {
+		return err
+	}
+	if _, err = s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_source ON proxies(source, status)`); err != nil {
+		return err
+	}
+	if _, err = s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_proxy_identity ON proxies(address, source, subscription_id)`); err != nil {
+		return fmt.Errorf("create proxy identity index: %w", err)
+	}
+	if _, err = s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_subscription_url_unique ON subscriptions(url) WHERE url != ''`); err != nil {
+		return fmt.Errorf("create subscription url unique index: %w", err)
+	}
+	if _, err = s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_subscription_file_path_unique ON subscriptions(file_path) WHERE file_path != ''`); err != nil {
+		return fmt.Errorf("create subscription file_path unique index: %w", err)
 	}
 
 	return nil

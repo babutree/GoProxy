@@ -1,12 +1,17 @@
 package webui
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,12 +25,34 @@ import (
 var (
 	sessions   = make(map[string]time.Time)
 	sessionsMu sync.Mutex
+
+	loginAttempts   = make(map[string]loginAttempt)
+	loginAttemptsMu sync.Mutex
 )
 
+const (
+	sessionTokenBytes = 32
+	sessionTTL        = 24 * time.Hour
+	maxLoginFailures  = 5
+	loginLockout      = time.Minute
+	maxLoginBody      = 8 << 10
+	maxAPIRequestBody = 2 << 20
+)
+
+type loginAttempt struct {
+	Failures    int
+	LockedUntil time.Time
+	LastFailure time.Time
+}
+
 func newSession() string {
-	token := fmt.Sprintf("%x", sha256.Sum256([]byte(fmt.Sprintf("%d", time.Now().UnixNano()))))
+	raw := make([]byte, sessionTokenBytes)
+	if _, err := rand.Read(raw); err != nil {
+		panic(fmt.Sprintf("webui: generate session token: %v", err))
+	}
+	token := hex.EncodeToString(raw)
 	sessionsMu.Lock()
-	sessions[token] = time.Now().Add(24 * time.Hour)
+	sessions[token] = time.Now().Add(sessionTTL)
 	sessionsMu.Unlock()
 	return token
 }
@@ -39,6 +66,93 @@ func validSession(r *http.Request) bool {
 	expiry, ok := sessions[cookie.Value]
 	sessionsMu.Unlock()
 	return ok && time.Now().Before(expiry)
+}
+
+func cookieSecure(r *http.Request) bool {
+	return r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
+}
+
+func sessionCookie(r *http.Request, token string) *http.Cookie {
+	return &http.Cookie{
+		Name:     "session",
+		Value:    token,
+		Path:     "/",
+		Expires:  time.Now().Add(sessionTTL),
+		HttpOnly: true,
+		Secure:   cookieSecure(r),
+		SameSite: http.SameSiteLaxMode,
+	}
+}
+
+func clearSessionCookie(r *http.Request) *http.Cookie {
+	return &http.Cookie{
+		Name:     "session",
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   cookieSecure(r),
+		SameSite: http.SameSiteLaxMode,
+	}
+}
+
+// loginClientKey 计算登录限速的客户端标识键。
+//
+// 口径与 cookieSecure 一致：信任前置反向代理设置的 XFF 头。当存在 X-Forwarded-For 时，
+// 取其第一段（最靠近客户端的地址）作为限速键，否则回退到 r.RemoteAddr 的 host。
+// 这样部署在反代之后时，不会因所有请求的 RemoteAddr 都是反代地址而把全网用户锁进同一个桶。
+//
+// 安全说明：XFF 可被客户端伪造。但这里是登录“限速”而非“鉴权”——伪造 XFF 只会让攻击者
+// 被独立计数到一个自己控制的键上，无法借此绕过针对真实来源的锁定，也无法冒充他人身份。
+// 若未部署可信反代却直接暴露，攻击者可通过轮换伪造 XFF 规避限速；此为已知权衡，需靠前置
+// 可信反代正确设置 XFF 来保证。
+func loginClientKey(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		// XFF 形如 "client, proxy1, proxy2"；第一段是最原始的客户端地址。
+		first := xff
+		if idx := strings.IndexByte(xff, ','); idx >= 0 {
+			first = xff[:idx]
+		}
+		if first = strings.TrimSpace(first); first != "" {
+			return first
+		}
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil || host == "" {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+func loginRateLimited(r *http.Request, now time.Time) bool {
+	key := loginClientKey(r)
+	loginAttemptsMu.Lock()
+	attempt := loginAttempts[key]
+	loginAttemptsMu.Unlock()
+	return attempt.LockedUntil.After(now)
+}
+
+func recordLoginFailure(r *http.Request, now time.Time) {
+	key := loginClientKey(r)
+	loginAttemptsMu.Lock()
+	defer loginAttemptsMu.Unlock()
+	attempt := loginAttempts[key]
+	if now.Sub(attempt.LastFailure) > loginLockout {
+		attempt.Failures = 0
+	}
+	attempt.Failures++
+	attempt.LastFailure = now
+	if attempt.Failures >= maxLoginFailures {
+		attempt.LockedUntil = now.Add(loginLockout)
+	}
+	loginAttempts[key] = attempt
+}
+
+func recordLoginSuccess(r *http.Request) {
+	key := loginClientKey(r)
+	loginAttemptsMu.Lock()
+	delete(loginAttempts, key)
+	loginAttemptsMu.Unlock()
 }
 
 type Server struct {
@@ -153,8 +267,57 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			http.Redirect(w, r, "/login", http.StatusFound)
 			return
 		}
+		if len(r.URL.Path) >= 4 && r.URL.Path[:4] == "/api" && isUnsafeMethod(r.Method) {
+			if !validCSRF(r) {
+				jsonError(w, "forbidden", http.StatusForbidden)
+				return
+			}
+			r.Body = http.MaxBytesReader(w, r.Body, maxAPIRequestBody)
+		}
 		next(w, r)
 	}
+}
+
+func isUnsafeMethod(method string) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace:
+		return false
+	default:
+		return true
+	}
+}
+
+func validCSRF(r *http.Request) bool {
+	if validCSRFFromHeader(r) {
+		return true
+	}
+	if sameOriginHeader(r.Header.Get("Origin"), r.Host) {
+		return true
+	}
+	return sameOriginHeader(r.Header.Get("Referer"), r.Host)
+}
+
+func validCSRFFromHeader(r *http.Request) bool {
+	cookie, err := r.Cookie("session")
+	if err != nil || cookie.Value == "" {
+		return false
+	}
+	token := r.Header.Get("X-CSRF-Token")
+	if token == "" || len(token) != len(cookie.Value) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(token), []byte(cookie.Value)) == 1
+}
+
+func sameOriginHeader(raw string, host string) bool {
+	if raw == "" || host == "" {
+		return false
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	return u.Host == host && (u.Scheme == "http" || u.Scheme == "https")
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -176,21 +339,29 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, loginHTML)
 		return
 	}
+	if r.Method != http.MethodPost {
+		jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	now := time.Now()
+	if loginRateLimited(r, now) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusTooManyRequests)
+		fmt.Fprint(w, loginHTMLWithError)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxLoginBody)
 	password := r.FormValue("password")
 	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(password)))
 	if hash != s.cfg.WebUIPasswordHash {
+		recordLoginFailure(r, now)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprint(w, loginHTMLWithError)
 		return
 	}
+	recordLoginSuccess(r)
 	token := newSession()
-	http.SetCookie(w, &http.Cookie{
-		Name:     "session",
-		Value:    token,
-		Path:     "/",
-		Expires:  time.Now().Add(24 * time.Hour),
-		HttpOnly: true,
-	})
+	http.SetCookie(w, sessionCookie(r, token))
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
@@ -200,7 +371,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		delete(sessions, cookie.Value)
 		sessionsMu.Unlock()
 	}
-	http.SetCookie(w, &http.Cookie{Name: "session", Value: "", Path: "/", MaxAge: -1})
+	http.SetCookie(w, clearSessionCookie(r))
 	http.Redirect(w, r, "/login", http.StatusFound)
 }
 

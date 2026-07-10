@@ -2,6 +2,7 @@ package webui
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -13,11 +14,14 @@ import (
 	"goproxy/storage"
 )
 
+const maxSubscriptionFileContentBytes = 1 << 20
+
 // apiSubscriptions 获取订阅列表（含每个订阅的可用/不可用代理数）
 func (s *Server) apiSubscriptions(w http.ResponseWriter, r *http.Request) {
 	subs, err := s.storage.GetSubscriptions()
 	if err != nil {
-		jsonError(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("[webui] list subscriptions failed: %v", err)
+		jsonError(w, "failed to list subscriptions", http.StatusInternalServerError)
 		return
 	}
 	if subs == nil {
@@ -29,14 +33,29 @@ func (s *Server) apiSubscriptions(w http.ResponseWriter, r *http.Request) {
 		storage.Subscription
 		ActiveCount   int `json:"active_count"`
 		DisabledCount int `json:"disabled_count"`
+		PausedCount   int `json:"paused_count"`
 	}
 	var result []subWithStats
 	for _, sub := range subs {
-		active, disabled := s.storage.CountBySubscriptionID(sub.ID)
+		active, disabled, err := s.storage.CountBySubscriptionID(sub.ID)
+		if err != nil {
+			log.Printf("[webui] count subscription #%d proxies failed: %v", sub.ID, err)
+			jsonError(w, "failed to list subscriptions", http.StatusInternalServerError)
+			return
+		}
+		// 节点级用户暂停计数(user_paused=1)。出错时记 log 并返回错误，不吞错返回假 0，
+		// 否则前端会把 paused_count=0 当真值显示，掩盖统计失败。
+		paused, err := s.storage.CountPausedBySubscriptionID(sub.ID)
+		if err != nil {
+			log.Printf("[webui] count subscription #%d paused proxies failed: %v", sub.ID, err)
+			jsonError(w, "failed to list subscriptions", http.StatusInternalServerError)
+			return
+		}
 		result = append(result, subWithStats{
 			Subscription:  sub,
 			ActiveCount:   active,
 			DisabledCount: disabled,
+			PausedCount:   paused,
 		})
 	}
 	jsonOK(w, result)
@@ -66,11 +85,20 @@ func (s *Server) apiSubscriptionAdd(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name        string `json:"name"`
 		URL         string `json:"url"`
-		FileContent string `json:"file_content"` // 上传的文件内容（Base64 编码）
+		FileContent string `json:"file_content"` // 粘贴的原始订阅内容；解析器会自动识别 YAML、协议链接、Base64 或纯文本。
 		RefreshMin  int    `json:"refresh_min"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			jsonError(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		jsonError(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if len(req.FileContent) > maxSubscriptionFileContentBytes {
+		jsonError(w, "file_content too large", http.StatusRequestEntityTooLarge)
 		return
 	}
 	if req.URL == "" && req.FileContent == "" {
@@ -95,7 +123,8 @@ func (s *Server) apiSubscriptionAdd(w http.ResponseWriter, r *http.Request) {
 		os.MkdirAll(subDir, 0755)
 		filePath = filepath.Join(subDir, fmt.Sprintf("sub_%d.yaml", time.Now().UnixMilli()))
 		if err := os.WriteFile(filePath, []byte(req.FileContent), 0644); err != nil {
-			jsonError(w, "保存文件失败: "+err.Error(), http.StatusInternalServerError)
+			log.Printf("[webui] save subscription file failed: %v", err)
+			jsonError(w, "failed to save subscription file", http.StatusInternalServerError)
 			return
 		}
 		filePath, _ = filepath.Abs(filePath)
@@ -109,7 +138,8 @@ func (s *Server) apiSubscriptionAdd(w http.ResponseWriter, r *http.Request) {
 			if filePath != "" {
 				os.Remove(filePath)
 			}
-			jsonError(w, "订阅验证失败: "+err.Error(), http.StatusBadRequest)
+			log.Printf("[webui] subscription validation failed: %v", err)
+			jsonError(w, "subscription validation failed", http.StatusBadRequest)
 			return
 		}
 		log.Printf("[webui] 订阅验证通过: %s (%d 个节点)", req.Name, nodeCount)
@@ -117,7 +147,8 @@ func (s *Server) apiSubscriptionAdd(w http.ResponseWriter, r *http.Request) {
 
 	id, err := s.storage.AddSubscription(req.Name, req.URL, filePath, "auto", req.RefreshMin)
 	if err != nil {
-		jsonError(w, "add subscription error: "+err.Error(), http.StatusInternalServerError)
+		log.Printf("[webui] add subscription failed: %v", err)
+		jsonError(w, "failed to add subscription", http.StatusInternalServerError)
 		return
 	}
 
@@ -157,7 +188,8 @@ func (s *Server) apiSubscriptionDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.storage.DeleteSubscription(req.ID); err != nil {
-		jsonError(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("[webui] delete subscription #%d failed: %v", req.ID, err)
+		jsonError(w, "failed to delete subscription", http.StatusInternalServerError)
 		return
 	}
 
@@ -225,7 +257,8 @@ func (s *Server) apiSubscriptionToggle(w http.ResponseWriter, r *http.Request) {
 
 	status, err := s.storage.ToggleSubscription(req.ID)
 	if err != nil {
-		jsonError(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("[webui] toggle subscription #%d failed: %v", req.ID, err)
+		jsonError(w, "failed to toggle subscription", http.StatusInternalServerError)
 		return
 	}
 

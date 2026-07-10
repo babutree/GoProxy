@@ -11,7 +11,8 @@ on:
 env:
   REGISTRY_DOCKERHUB: docker.io
   REGISTRY_GHCR: ghcr.io
-  IMAGE_NAME: isboyjc/goproxy
+  GHCR_IMAGE_NAME: babutree/goproxy
+  DOCKERHUB_IMAGE_NAME: babutree/goproxy
 
 jobs:
   build-and-push:
@@ -44,7 +45,7 @@ jobs:
         id: meta-ghcr
         uses: docker/metadata-action@v5.5.1
         with:
-          images: ${{ env.REGISTRY_GHCR }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.REGISTRY_GHCR }}/${{ env.GHCR_IMAGE_NAME }}
           tags: |
             type=ref,event=branch
             type=semver,pattern={{version}}
@@ -57,7 +58,7 @@ jobs:
         if: steps.dockerhub-check.outputs.available == 'true'
         uses: docker/metadata-action@v5.5.1
         with:
-          images: ${{ env.REGISTRY_DOCKERHUB }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.REGISTRY_DOCKERHUB }}/${{ env.DOCKERHUB_IMAGE_NAME }}
           tags: |
             type=ref,event=branch
             type=semver,pattern={{version}}

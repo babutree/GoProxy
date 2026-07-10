@@ -2,6 +2,7 @@ package webui
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 
 	"goproxy/storage"
@@ -26,7 +27,8 @@ func (s *Server) apiManualNodeAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.customMgr.AddManualNode(req.Link, req.Region, req.Note); err != nil {
-		jsonError(w, err.Error(), http.StatusBadRequest)
+		log.Printf("[webui] add manual node failed: %v", err)
+		jsonError(w, "failed to add manual node", http.StatusBadRequest)
 		return
 	}
 	jsonOK(w, map[string]string{"status": "added"})
@@ -34,14 +36,17 @@ func (s *Server) apiManualNodeAdd(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) apiManualNodeRegion(w http.ResponseWriter, r *http.Request) {
 	var req struct {
+		ID      int64  `json:"id"`
 		Address string `json:"address"`
 		Region  string `json:"region"`
 	}
-	if !s.requireManualNodeRequest(w, r, &req, &req.Address) {
+	proxy, ok := s.requireManualNodeRequest(w, r, &req, &req.ID, &req.Address)
+	if !ok {
 		return
 	}
-	if err := s.storage.UpdateProxyRegion(req.Address, req.Region, true); err != nil {
-		jsonError(w, err.Error(), http.StatusInternalServerError)
+	if err := s.storage.UpdateProxyRegionByID(proxy.ID, req.Region, true); err != nil {
+		log.Printf("[webui] update manual node region %q failed: %v", req.Address, err)
+		jsonError(w, "failed to update manual node region", http.StatusInternalServerError)
 		return
 	}
 	jsonOK(w, map[string]string{"status": "updated"})
@@ -49,14 +54,17 @@ func (s *Server) apiManualNodeRegion(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) apiManualNodeNote(w http.ResponseWriter, r *http.Request) {
 	var req struct {
+		ID      int64  `json:"id"`
 		Address string `json:"address"`
 		Note    string `json:"note"`
 	}
-	if !s.requireManualNodeRequest(w, r, &req, &req.Address) {
+	proxy, ok := s.requireManualNodeRequest(w, r, &req, &req.ID, &req.Address)
+	if !ok {
 		return
 	}
-	if err := s.storage.UpdateProxyNote(req.Address, req.Note); err != nil {
-		jsonError(w, err.Error(), http.StatusInternalServerError)
+	if err := s.storage.UpdateProxyNoteByID(proxy.ID, req.Note); err != nil {
+		log.Printf("[webui] update manual node note %q failed: %v", req.Address, err)
+		jsonError(w, "failed to update manual node note", http.StatusInternalServerError)
 		return
 	}
 	jsonOK(w, map[string]string{"status": "updated"})
@@ -64,37 +72,50 @@ func (s *Server) apiManualNodeNote(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) apiManualNodeDelete(w http.ResponseWriter, r *http.Request) {
 	var req struct {
+		ID      int64  `json:"id"`
 		Address string `json:"address"`
 	}
-	if !s.requireManualNodeRequest(w, r, &req, &req.Address) {
+	proxy, ok := s.requireManualNodeRequest(w, r, &req, &req.ID, &req.Address)
+	if !ok {
 		return
 	}
-	if err := s.storage.DeleteManualProxy(req.Address); err != nil {
-		jsonError(w, err.Error(), http.StatusInternalServerError)
+	if err := s.storage.DeleteProxyByID(proxy.ID); err != nil {
+		log.Printf("[webui] delete manual node %q failed: %v", req.Address, err)
+		jsonError(w, "failed to delete manual node", http.StatusInternalServerError)
 		return
 	}
 	jsonOK(w, map[string]string{"status": "deleted"})
 }
 
-func (s *Server) requireManualNodeRequest(w http.ResponseWriter, r *http.Request, dst interface{}, address *string) bool {
+func (s *Server) requireManualNodeRequest(w http.ResponseWriter, r *http.Request, dst interface{}, id *int64, address *string) (*storage.Proxy, bool) {
 	if r.Method != http.MethodPost {
 		jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
-		return false
+		return nil, false
 	}
-	if err := decodeJSON(r, dst); err != nil || *address == "" {
+	if err := decodeJSON(r, dst); err != nil {
 		jsonError(w, "invalid request", http.StatusBadRequest)
-		return false
+		return nil, false
 	}
-	proxy, err := s.storage.GetProxyByAddress(*address)
+	var proxy *storage.Proxy
+	var err error
+	if *id > 0 {
+		proxy, err = s.storage.GetProxyByID(*id)
+	} else if *address != "" {
+		proxy, err = s.storage.GetProxyByAddress(*address)
+	} else {
+		jsonError(w, "invalid request", http.StatusBadRequest)
+		return nil, false
+	}
 	if err != nil {
-		jsonError(w, err.Error(), http.StatusNotFound)
-		return false
+		log.Printf("[webui] manual node id=%d address=%q not found: %v", *id, *address, err)
+		jsonError(w, "manual node not found", http.StatusNotFound)
+		return nil, false
 	}
 	if proxy.Source != storage.SourceManual {
 		jsonError(w, "manual nodes only", http.StatusForbidden)
-		return false
+		return nil, false
 	}
-	return true
+	return proxy, true
 }
 
 func decodeJSON(r *http.Request, dst interface{}) error {

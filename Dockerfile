@@ -19,7 +19,7 @@ RUN ARCH=$(case "$(dpkg --print-architecture)" in amd64) echo "amd64";; arm64) e
     rm -rf /tmp/sing-box*
 
 # 运行阶段（使用轻量 debian-slim）
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates tzdata curl && \

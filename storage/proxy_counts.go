@@ -6,7 +6,9 @@ import "database/sql"
 func (s *Storage) GetAverageLatency(protocol string) (int, error) {
 	var avg sql.NullFloat64
 	err := s.db.QueryRow(
-		`SELECT AVG(latency) FROM proxies WHERE protocol = ? AND status = 'active' AND latency > 0`,
+		`SELECT AVG(latency) FROM proxies
+		 WHERE protocol = ? AND status = 'active' AND user_paused = 0 AND latency > 0
+		   AND NOT EXISTS (SELECT 1 FROM subscriptions WHERE subscriptions.id = proxies.subscription_id AND subscriptions.status = 'paused')`,
 		protocol,
 	).Scan(&avg)
 	if err != nil || !avg.Valid {
@@ -20,7 +22,8 @@ func (s *Storage) GetQualityDistribution() (map[string]int, error) {
 	rows, err := s.db.Query(
 		`SELECT quality_grade, COUNT(*) as count 
 		 FROM proxies 
-		 WHERE status = 'active' AND fail_count < 3
+		 WHERE status = 'active' AND user_paused = 0 AND fail_count < 3
+		   AND NOT EXISTS (SELECT 1 FROM subscriptions WHERE subscriptions.id = proxies.subscription_id AND subscriptions.status = 'paused')
 		 GROUP BY quality_grade`,
 	)
 	if err != nil {
@@ -44,7 +47,9 @@ func (s *Storage) GetQualityDistribution() (map[string]int, error) {
 func (s *Storage) CountAll() (int, error) {
 	var count int
 	err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM proxies WHERE status IN ('active', 'degraded') AND fail_count < 3`,
+		`SELECT COUNT(*) FROM proxies
+		 WHERE status IN ('active', 'degraded') AND user_paused = 0 AND fail_count < 3
+		   AND NOT EXISTS (SELECT 1 FROM subscriptions WHERE subscriptions.id = proxies.subscription_id AND subscriptions.status = 'paused')`,
 	).Scan(&count)
 	return count, err
 }
@@ -53,7 +58,9 @@ func (s *Storage) CountAll() (int, error) {
 func (s *Storage) CountAvailableByProtocol(protocol string) (int, error) {
 	var count int
 	err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM proxies WHERE status IN ('active', 'degraded') AND fail_count < 3 AND protocol = ?`,
+		`SELECT COUNT(*) FROM proxies
+		 WHERE status IN ('active', 'degraded') AND user_paused = 0 AND fail_count < 3 AND protocol = ?
+		   AND NOT EXISTS (SELECT 1 FROM subscriptions WHERE subscriptions.id = proxies.subscription_id AND subscriptions.status = 'paused')`,
 		protocol,
 	).Scan(&count)
 	return count, err
@@ -63,7 +70,9 @@ func (s *Storage) CountAvailableByProtocol(protocol string) (int, error) {
 func (s *Storage) CountBySource(source string) (int, error) {
 	var count int
 	err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM proxies WHERE source = ? AND status IN ('active', 'degraded') AND fail_count < 3`,
+		`SELECT COUNT(*) FROM proxies
+		 WHERE source = ? AND status IN ('active', 'degraded') AND user_paused = 0 AND fail_count < 3
+		   AND NOT EXISTS (SELECT 1 FROM subscriptions WHERE subscriptions.id = proxies.subscription_id AND subscriptions.status = 'paused')`,
 		source,
 	).Scan(&count)
 	return count, err

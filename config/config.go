@@ -102,13 +102,13 @@ func DefaultConfig() *Config {
 		ProxyAuthEnabled:       true,
 		ProxyAuthUsername:      "acct",
 		SessionTTLMinutes:      envInt("SESSION_TTL_MINUTES", 10),
-		DefaultRegion:          strings.ToLower(strings.TrimSpace(os.Getenv("DEFAULT_REGION"))),
+		DefaultRegion:          NormalizeCountryCode(os.Getenv("DEFAULT_REGION")),
 		BlockedCountries:       envCountriesDefault("BLOCKED_COUNTRIES", []string{"CN"}),
 		AllowedCountries:       envCountries("ALLOWED_COUNTRIES"),
 		DBPath:                 dataDir() + "proxy.db",
 		ValidateConcurrency:    300,
 		ValidateTimeout:        10,
-		ValidateURL:            "http://www.gstatic.com/generate_204",
+		ValidateURL:            "http://www.gstatic.com/generate_204,http://cp.cloudflare.com/generate_204,http://captive.apple.com/hotspot-detect.html",
 		MaxResponseMs:          5000,
 		HealthIntervalMinutes:  envInt("HEALTH_CHECK_INTERVAL", 5),
 		HealthCheckBatchSize:   20,
@@ -156,7 +156,6 @@ func bootstrapCredentials(cfg *Config) {
 		}
 		info.ProxyAuthUsername = cfg.ProxyAuthUsername
 		info.ProxyAuthPassword = generateCredential()
-		cfg.ProxyAuthPassword = info.ProxyAuthPassword
 		cfg.ProxyAuthPasswordHash = passwordHash(info.ProxyAuthPassword)
 	}
 	firstBoot = info
@@ -191,13 +190,6 @@ type savedConfig struct {
 }
 
 func Save(cfg *Config) error {
-	cfgMu.Lock()
-	if globalCfg == nil {
-		globalCfg = &Config{}
-	}
-	*globalCfg = *cfg
-	cfgMu.Unlock()
-
 	authEnabled := cfg.ProxyAuthEnabled
 	maxRetry := cfg.MaxRetry
 	data, err := json.MarshalIndent(savedConfig{
@@ -207,20 +199,35 @@ func Save(cfg *Config) error {
 		WebUIPasswordHash:     cfg.WebUIPasswordHash,
 		ProxyAuthEnabled:      &authEnabled,
 		ProxyAuthUsername:     cfg.ProxyAuthUsername,
-		ProxyAuthPassword:     cfg.ProxyAuthPassword,
 		ProxyAuthPasswordHash: cfg.ProxyAuthPasswordHash,
 		SessionTTLMinutes:     cfg.SessionTTLMinutes,
-		DefaultRegion:         cfg.DefaultRegion,
+		DefaultRegion:         NormalizeCountryCode(cfg.DefaultRegion),
 		HealthIntervalMinutes: cfg.HealthIntervalMinutes,
 		MaxRetry:              &maxRetry,
 		SingBoxPath:           cfg.SingBoxPath,
-		BlockedCountries:      cfg.BlockedCountries,
-		AllowedCountries:      cfg.AllowedCountries,
+		BlockedCountries:      NormalizeCountryCodes(cfg.BlockedCountries),
+		AllowedCountries:      NormalizeCountryCodes(cfg.AllowedCountries),
 	}, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(ConfigFile(), data, 0644)
+	if err := os.WriteFile(ConfigFile(), data, 0644); err != nil {
+		return err
+	}
+
+	saved := *cfg
+	saved.ProxyAuthPassword = ""
+	saved.DefaultRegion = NormalizeCountryCode(saved.DefaultRegion)
+	saved.BlockedCountries = NormalizeCountryCodes(saved.BlockedCountries)
+	saved.AllowedCountries = NormalizeCountryCodes(saved.AllowedCountries)
+	// 用指针替换而非原地改写 *globalCfg：已发布的 *Config 视为不可变快照。
+	// 这样任何通过 Get() 持有旧指针的读者（如 validator 缓存的 v.cfg）要么看到
+	// 完整的旧结构体，要么在下次 Get() 时看到完整的新结构体，绝不会读到被 Save
+	// 原地改写到一半的 slice header（数据竞争 / 读撕裂）。
+	cfgMu.Lock()
+	globalCfg = &saved
+	cfgMu.Unlock()
+	return nil
 }
 
 func applySavedConfig(cfg *Config, saved savedConfig) {
@@ -242,17 +249,16 @@ func applySavedConfig(cfg *Config, saved savedConfig) {
 	if saved.ProxyAuthUsername != "" {
 		cfg.ProxyAuthUsername = saved.ProxyAuthUsername
 	}
-	if saved.ProxyAuthPassword != "" {
-		cfg.ProxyAuthPassword = saved.ProxyAuthPassword
-		cfg.ProxyAuthPasswordHash = passwordHash(saved.ProxyAuthPassword)
-	} else if saved.ProxyAuthPasswordHash != "" {
+	if saved.ProxyAuthPasswordHash != "" {
 		cfg.ProxyAuthPasswordHash = saved.ProxyAuthPasswordHash
+	} else if saved.ProxyAuthPassword != "" {
+		cfg.ProxyAuthPasswordHash = passwordHash(saved.ProxyAuthPassword)
 	}
 	if saved.SessionTTLMinutes > 0 {
 		cfg.SessionTTLMinutes = saved.SessionTTLMinutes
 	}
 	if saved.DefaultRegion != "" {
-		cfg.DefaultRegion = strings.ToLower(strings.TrimSpace(saved.DefaultRegion))
+		cfg.DefaultRegion = NormalizeCountryCode(saved.DefaultRegion)
 	}
 	if saved.HealthIntervalMinutes > 0 {
 		cfg.HealthIntervalMinutes = saved.HealthIntervalMinutes
@@ -264,10 +270,10 @@ func applySavedConfig(cfg *Config, saved savedConfig) {
 		cfg.SingBoxPath = saved.SingBoxPath
 	}
 	if saved.BlockedCountries != nil {
-		cfg.BlockedCountries = saved.BlockedCountries
+		cfg.BlockedCountries = NormalizeCountryCodes(saved.BlockedCountries)
 	}
 	if saved.AllowedCountries != nil {
-		cfg.AllowedCountries = saved.AllowedCountries
+		cfg.AllowedCountries = NormalizeCountryCodes(saved.AllowedCountries)
 	}
 }
 
@@ -313,12 +319,39 @@ func envCountries(key string) []string {
 	parts := strings.Split(value, ",")
 	countries := make([]string, 0, len(parts))
 	for _, part := range parts {
-		country := strings.ToUpper(strings.TrimSpace(part))
+		country := NormalizeCountryCode(part)
 		if country != "" {
 			countries = append(countries, country)
 		}
 	}
 	return countries
+}
+
+func NormalizeCountryCode(value string) string {
+	code := strings.ToUpper(strings.TrimSpace(value))
+	if len(code) != 2 {
+		return ""
+	}
+	for _, ch := range code {
+		if ch < 'A' || ch > 'Z' {
+			return ""
+		}
+	}
+	return code
+}
+
+func NormalizeCountryCodes(values []string) []string {
+	normalized := make([]string, 0, len(values))
+	seen := make(map[string]bool, len(values))
+	for _, value := range values {
+		code := NormalizeCountryCode(value)
+		if code == "" || seen[code] {
+			continue
+		}
+		seen[code] = true
+		normalized = append(normalized, code)
+	}
+	return normalized
 }
 
 // envCountriesDefault 与 envCountries 类似，但在环境变量“未设置”时返回给定默认值。

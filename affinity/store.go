@@ -6,6 +6,7 @@ import (
 )
 
 type Binding struct {
+	ProxyID     int64
 	NodeAddress string
 	Region      string
 	LastActive  time.Time
@@ -27,6 +28,7 @@ type Store struct {
 // suitable for exposing to a WebUI session-monitor panel.
 type SessionBinding struct {
 	SessionID   string
+	ProxyID     int64
 	NodeAddress string
 	Region      string
 	LastActive  time.Time
@@ -58,9 +60,13 @@ func (s *Store) Get(sessionID string) (Binding, bool) {
 }
 
 func (s *Store) Set(sessionID string, nodeAddress string, region string) {
+	s.SetProxy(sessionID, 0, nodeAddress, region)
+}
+
+func (s *Store) SetProxy(sessionID string, proxyID int64, nodeAddress string, region string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.bindings[sessionID] = Binding{NodeAddress: nodeAddress, Region: region, LastActive: s.now()}
+	s.bindings[sessionID] = Binding{ProxyID: proxyID, NodeAddress: nodeAddress, Region: region, LastActive: s.now()}
 }
 
 func (s *Store) Remove(sessionID string) {
@@ -158,6 +164,7 @@ func (s *Store) List() []SessionBinding {
 		}
 		result = append(result, SessionBinding{
 			SessionID:   sessionID,
+			ProxyID:     binding.ProxyID,
 			NodeAddress: binding.NodeAddress,
 			Region:      binding.Region,
 			LastActive:  binding.LastActive,
@@ -184,13 +191,23 @@ func (s *Store) Count() int {
 // TTL returns the configured session time-to-live. The UI can combine this
 // with SessionBinding.LastActive to compute a countdown.
 func (s *Store) TTL() time.Duration {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.ttl
+}
+
+func (s *Store) SetTTL(ttl time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ttl = ttl
 }
 
 // RemainingTTL returns how long until the given binding expires, based on the
 // store's clock. It returns 0 once the binding is at or past expiry, and 0 when
 // no TTL is configured (ttl <= 0). This is read-only.
 func (s *Store) RemainingTTL(binding SessionBinding) time.Duration {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if s.ttl <= 0 {
 		return 0
 	}

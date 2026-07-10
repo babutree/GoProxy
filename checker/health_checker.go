@@ -9,6 +9,10 @@ import (
 	"goproxy/validator"
 )
 
+// failDisableThreshold 连续失败达到该阈值即禁用节点，与代理请求路径
+// (proxy 包) 使用同一阈值语义。见 BUG-53。
+const failDisableThreshold = 3
+
 // HealthChecker 健康检查器
 type HealthChecker struct {
 	storage   *storage.Storage
@@ -66,15 +70,17 @@ func (hc *HealthChecker) RunOnce() {
 			validCount++
 			// 更新延迟和质量等级
 			latencyMs := int(result.Latency.Milliseconds())
-			if err := hc.storage.UpdateExitInfo(result.Proxy.Address, result.ExitIP, result.ExitLocation, latencyMs); err == nil {
+			if err := hc.storage.UpdateProxyExitInfo(result.Proxy.ID, result.ExitIP, result.ExitLocation, latencyMs); err == nil {
 				updateCount++
 			}
 		} else {
 			// 失败次数+1
-			hc.storage.IncrementFailCount(result.Proxy.Address)
-			// 如果失败次数 >= 3，禁用节点等待显式处理或后续探测恢复。
-			if result.Proxy.FailCount+1 >= 3 {
-				hc.storage.DisableProxy(result.Proxy.Address)
+			hc.storage.RecordProxyUseByID(result.Proxy.ID, false)
+			// 如果失败次数达到阈值，禁用节点等待显式处理或后续探测恢复。
+			// 成功路径 UpdateProxyExitInfo 会将 fail_count 归零（BUG-53），
+			// 故只有持续探测失败的节点才会累加到此处被 disable。
+			if result.Proxy.FailCount+1 >= failDisableThreshold {
+				hc.storage.DisableProxyByID(result.Proxy.ID)
 				disableCount++
 			}
 		}

@@ -2,7 +2,9 @@ package webui
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -120,7 +122,8 @@ func TestConfigGetReturnsActiveGatewayFieldsOnly(t *testing.T) {
 	}
 	wantKeys := []string{
 		"allowed_countries", "blocked_countries", "default_region", "health_check_interval", "http_port", "max_retry",
-		"proxy_auth_enabled", "proxy_auth_username", "session_ttl_minutes", "singbox_path", "socks5_port", "webui_port",
+		"proxy_auth_enabled", "proxy_auth_username", "readonly_fields", "restart_required_fields", "session_ttl_minutes",
+		"singbox_path", "socks5_port", "webui_port",
 	}
 	if !reflect.DeepEqual(sortedKeys(got), wantKeys) {
 		t.Fatalf("config keys = %#v, want %#v; body=%s", sortedKeys(got), wantKeys, rec.Body.String())
@@ -133,20 +136,21 @@ func TestConfigGetReturnsActiveGatewayFieldsOnly(t *testing.T) {
 
 func TestConfigSavePersistsActiveEditableFields(t *testing.T) {
 	server := newTestServer(t)
+	oldHash := sha256Hex("old-secret")
 	server.cfg.ProxyAuthPassword = "old-secret"
-	server.cfg.ProxyAuthPasswordHash = "old-hash"
+	server.cfg.ProxyAuthPasswordHash = oldHash
 	setTestGlobalConfig(t, server.cfg)
-	payload := `{"proxy_auth_enabled":true,"proxy_auth_username":"edge","proxy_auth_password":"","session_ttl_minutes":25,"default_region":"us","health_check_interval":8,"max_retry":0,"singbox_path":"D:/tools/sing-box.exe","allowed_countries":["US","JP"],"blocked_countries":["CN"]}`
+	payload := `{"proxy_auth_enabled":true,"proxy_auth_username":"edge","proxy_auth_password":"","session_ttl_minutes":25,"default_region":" us ","health_check_interval":8,"max_retry":0,"singbox_path":"D:/tools/sing-box.exe","allowed_countries":[" us ","JP","jp","bad"],"blocked_countries":[" cn "]}`
 
 	serveAuthenticated(t, server, "/api/config/save", payload, http.StatusOK)
 
 	if server.cfg.ProxyAuthEnabled != true || server.cfg.ProxyAuthUsername != "edge" {
 		t.Fatalf("auth config = enabled:%v username:%q", server.cfg.ProxyAuthEnabled, server.cfg.ProxyAuthUsername)
 	}
-	if server.cfg.ProxyAuthPassword != "old-secret" || server.cfg.ProxyAuthPasswordHash != "old-hash" {
+	if server.cfg.ProxyAuthPassword != "" || server.cfg.ProxyAuthPasswordHash != oldHash {
 		t.Fatalf("empty password changed stored password/hash: %q/%q", server.cfg.ProxyAuthPassword, server.cfg.ProxyAuthPasswordHash)
 	}
-	if server.cfg.SessionTTLMinutes != 25 || server.cfg.DefaultRegion != "us" || server.cfg.HealthIntervalMinutes != 8 || server.cfg.MaxRetry != 0 {
+	if server.cfg.SessionTTLMinutes != 25 || server.cfg.DefaultRegion != "US" || server.cfg.HealthIntervalMinutes != 8 || server.cfg.MaxRetry != 0 {
 		t.Fatalf("runtime config = ttl:%d region:%q health:%d retry:%d", server.cfg.SessionTTLMinutes, server.cfg.DefaultRegion, server.cfg.HealthIntervalMinutes, server.cfg.MaxRetry)
 	}
 	if server.cfg.SingBoxPath != "D:/tools/sing-box.exe" {
@@ -155,7 +159,76 @@ func TestConfigSavePersistsActiveEditableFields(t *testing.T) {
 	if !reflect.DeepEqual(server.cfg.AllowedCountries, []string{"US", "JP"}) || !reflect.DeepEqual(server.cfg.BlockedCountries, []string{"CN"}) {
 		t.Fatalf("countries = allowed:%#v blocked:%#v", server.cfg.AllowedCountries, server.cfg.BlockedCountries)
 	}
+	if server.affinity.TTL() != 25*time.Minute {
+		t.Fatalf("affinity TTL = %v, want 25m", server.affinity.TTL())
+	}
 	assertConfigJSONOmitsLegacyFields(t, config.ConfigFile())
+}
+
+func TestConfigSaveRejectsRuntimePortChanges(t *testing.T) {
+	server := newTestServer(t)
+	server.cfg.HTTPPort = ":7802"
+	server.cfg.SOCKS5Port = ":7801"
+	server.cfg.WebUIPort = ":7800"
+	setTestGlobalConfig(t, server.cfg)
+	payload := `{"http_port":":9902","proxy_auth_enabled":true,"proxy_auth_username":"edge","session_ttl_minutes":25,"health_check_interval":8,"max_retry":0,"singbox_path":"sing-box"}`
+
+	serveAuthenticated(t, server, "/api/config/save", payload, http.StatusBadRequest)
+
+	if got := config.Get(); got.HTTPPort != ":7802" {
+		t.Fatalf("HTTPPort after rejected save = %q, want :7802", got.HTTPPort)
+	}
+}
+
+func TestConfigSaveAppliesCountryFiltersImmediately(t *testing.T) {
+	server := newTestServer(t)
+	server.cfg.ProxyAuthUsername = "edge"
+	server.cfg.ProxyAuthPasswordHash = sha256Hex("secret")
+	server.cfg.SessionTTLMinutes = 10
+	server.cfg.HealthIntervalMinutes = 5
+	server.cfg.SingBoxPath = "sing-box"
+	setTestGlobalConfig(t, server.cfg)
+	insertWebUITestProxy(t, server.storage, "cn:8080", "CN", "active")
+	insertWebUITestProxy(t, server.storage, "us:8080", "US", "active")
+	payload := `{"proxy_auth_enabled":true,"proxy_auth_username":"edge","session_ttl_minutes":10,"health_check_interval":5,"max_retry":0,"singbox_path":"sing-box","blocked_countries":[" cn "]}`
+
+	serveAuthenticated(t, server, "/api/config/save", payload, http.StatusOK)
+
+	cnProxy, err := server.storage.GetProxyByAddress("cn:8080")
+	if err != nil {
+		t.Fatalf("GetProxyByAddress(cn) error = %v", err)
+	}
+	usProxy, err := server.storage.GetProxyByAddress("us:8080")
+	if err != nil {
+		t.Fatalf("GetProxyByAddress(us) error = %v", err)
+	}
+	if cnProxy.Status != "disabled" || usProxy.Status != "active" {
+		t.Fatalf("statuses after filter = cn:%s us:%s", cnProxy.Status, usProxy.Status)
+	}
+}
+
+func TestConfigSaveFailureLeavesRuntimeUnchanged(t *testing.T) {
+	server := newTestServer(t)
+	server.cfg.ProxyAuthUsername = "old"
+	server.cfg.SessionTTLMinutes = 10
+	server.cfg.HealthIntervalMinutes = 5
+	server.cfg.SingBoxPath = "sing-box"
+	setTestGlobalConfig(t, server.cfg)
+	badDataDir := filepath.Join(t.TempDir(), "not-dir")
+	if err := os.WriteFile(badDataDir, []byte("file"), 0644); err != nil {
+		t.Fatalf("create bad DATA_DIR file: %v", err)
+	}
+	t.Setenv("DATA_DIR", badDataDir)
+	payload := `{"proxy_auth_enabled":true,"proxy_auth_username":"new","session_ttl_minutes":25,"health_check_interval":5,"max_retry":0,"singbox_path":"sing-box"}`
+
+	serveAuthenticated(t, server, "/api/config/save", payload, http.StatusInternalServerError)
+
+	if server.cfg.ProxyAuthUsername != "old" || server.cfg.SessionTTLMinutes != 10 || server.affinity.TTL() != 10*time.Minute {
+		t.Fatalf("runtime changed after failed save: cfg=%#v ttl=%v", server.cfg, server.affinity.TTL())
+	}
+	if got := config.Get(); got.ProxyAuthUsername != "old" || got.SessionTTLMinutes != 10 {
+		t.Fatalf("global changed after failed save: %#v", got)
+	}
 }
 
 func TestManualNodeMutationRequiresAuthentication(t *testing.T) {
@@ -174,7 +247,11 @@ func TestManualNodeMutationRequiresAuthentication(t *testing.T) {
 
 func TestManualNodeRejectsSubscriptionSourceMutations(t *testing.T) {
 	server := newTestServer(t)
-	if err := server.storage.AddProxyWithSource("198.51.100.10:8080", "http", storage.SourceSubscription); err != nil {
+	subID, err := server.storage.AddSubscription("test", "https://example.test/webui.yaml", "", "auto", 60)
+	if err != nil {
+		t.Fatalf("AddSubscription() error = %v", err)
+	}
+	if err := server.storage.AddProxyWithSource("198.51.100.10:8080", "http", storage.SourceSubscription, subID); err != nil {
 		t.Fatalf("AddProxyWithSource() error = %v", err)
 	}
 
@@ -243,6 +320,138 @@ func TestManualNodeAddUsesCustomManagerDirectPath(t *testing.T) {
 	}
 	if proxy.Source != storage.SourceManual || proxy.Protocol != "http" || proxy.Region != "sg" || proxy.Note != "direct" {
 		t.Fatalf("proxy = %#v", proxy)
+	}
+}
+
+func TestNewSessionUsesHighEntropyTokens(t *testing.T) {
+	seen := make(map[string]bool)
+	for range 1000 {
+		token := newSession()
+		if len(token) != sessionTokenBytes*2 {
+			t.Fatalf("len(token) = %d, want %d", len(token), sessionTokenBytes*2)
+		}
+		if seen[token] {
+			t.Fatalf("duplicate token generated: %s", token)
+		}
+		seen[token] = true
+	}
+}
+
+func TestLoginRateLimitLocksRepeatedFailures(t *testing.T) {
+	server := newTestServer(t)
+	server.cfg.WebUIPasswordHash = sha256Hex("correct")
+
+	for i := 0; i < maxLoginFailures; i++ {
+		rec := serveLogin(t, server, "wrong", "198.51.100.10:12345", false)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("failure %d status = %d, want %d", i+1, rec.Code, http.StatusOK)
+		}
+	}
+
+	locked := serveLogin(t, server, "correct", "198.51.100.10:12345", false)
+	if locked.Code != http.StatusTooManyRequests {
+		t.Fatalf("locked status = %d, want %d", locked.Code, http.StatusTooManyRequests)
+	}
+
+	otherClient := serveLogin(t, server, "correct", "198.51.100.11:12345", false)
+	if otherClient.Code != http.StatusFound {
+		t.Fatalf("other client status = %d, want %d; body=%s", otherClient.Code, http.StatusFound, otherClient.Body.String())
+	}
+}
+
+func TestLoginCookieSecurityAttributes(t *testing.T) {
+	server := newTestServer(t)
+	server.cfg.WebUIPasswordHash = sha256Hex("correct")
+
+	secureRec := serveLogin(t, server, "correct", "198.51.100.12:12345", true)
+	secureCookie := findCookie(t, secureRec.Result().Cookies(), "session")
+	if !secureCookie.HttpOnly || !secureCookie.Secure || secureCookie.SameSite != http.SameSiteLaxMode {
+		t.Fatalf("secure cookie attrs = HttpOnly:%v Secure:%v SameSite:%v", secureCookie.HttpOnly, secureCookie.Secure, secureCookie.SameSite)
+	}
+
+	insecureRec := serveLogin(t, server, "correct", "198.51.100.13:12345", false)
+	insecureCookie := findCookie(t, insecureRec.Result().Cookies(), "session")
+	if insecureCookie.Secure {
+		t.Fatal("HTTP login cookie unexpectedly set Secure")
+	}
+	if !insecureCookie.HttpOnly || insecureCookie.SameSite != http.SameSiteLaxMode {
+		t.Fatalf("HTTP cookie attrs = HttpOnly:%v SameSite:%v", insecureCookie.HttpOnly, insecureCookie.SameSite)
+	}
+}
+
+func TestWriteAPIsRequireCSRFProof(t *testing.T) {
+	server := newTestServer(t)
+	token := newSession()
+	req := httptest.NewRequest(http.MethodPost, "/api/proxy/delete", strings.NewReader(`{"address":"203.0.113.10:8080"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: "session", Value: token})
+	rec := httptest.NewRecorder()
+
+	server.routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusForbidden, rec.Body.String())
+	}
+
+	allowed := httptest.NewRequest(http.MethodPost, "/api/proxy/delete", strings.NewReader(`{"address":"203.0.113.10:8080"}`))
+	allowed.Header.Set("Content-Type", "application/json")
+	allowed.Header.Set("X-CSRF-Token", token)
+	allowed.AddCookie(&http.Cookie{Name: "session", Value: token})
+	rec = httptest.NewRecorder()
+
+	server.routes().ServeHTTP(rec, allowed)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("CSRF-authenticated status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+}
+
+func TestSubscriptionFileContentRawContractAndSizeLimit(t *testing.T) {
+	server := newTestServer(t)
+	dataDir := t.TempDir()
+	t.Setenv("DATA_DIR", dataDir)
+	raw := "proxies:\n  - name: direct\n    type: http\n"
+	payload := fmt.Sprintf(`{"name":"raw","file_content":%q,"refresh_min":60}`, raw)
+
+	serveAuthenticated(t, server, "/api/subscription/add", payload, http.StatusOK)
+
+	subs, err := server.storage.GetSubscriptions()
+	if err != nil {
+		t.Fatalf("GetSubscriptions() error = %v", err)
+	}
+	if len(subs) != 1 {
+		t.Fatalf("len(subs) = %d, want 1", len(subs))
+	}
+	content, err := os.ReadFile(filepath.Clean(subs[0].FilePath))
+	if err != nil {
+		t.Fatalf("read subscription file: %v", err)
+	}
+	if string(content) != raw {
+		t.Fatalf("file content = %q, want raw %q", string(content), raw)
+	}
+
+	oversized := fmt.Sprintf(`{"name":"big","file_content":%q,"refresh_min":60}`, strings.Repeat("a", maxSubscriptionFileContentBytes+1))
+	serveAuthenticated(t, server, "/api/subscription/add", oversized, http.StatusRequestEntityTooLarge)
+}
+
+func TestAPIErrorResponsesAreSanitized(t *testing.T) {
+	server := newTestServer(t)
+	if err := server.storage.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	req := authenticatedJSONRequest(http.MethodGet, "/api/proxies", "")
+	rec := httptest.NewRecorder()
+
+	server.routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+	for _, leaked := range []string{"sql", "database", "closed", "D:\\", "/tmp/"} {
+		if strings.Contains(strings.ToLower(rec.Body.String()), strings.ToLower(leaked)) {
+			t.Fatalf("response leaked %q: %s", leaked, rec.Body.String())
+		}
 	}
 }
 
@@ -350,6 +559,7 @@ func TestRemovedContributionAPIRouteIsNotPublic(t *testing.T) {
 
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
+	resetWebUISecurityState()
 	store, err := storage.New(filepath.Join(t.TempDir(), "proxy.db"))
 	if err != nil {
 		t.Fatalf("storage.New() error = %v", err)
@@ -362,8 +572,65 @@ func newTestServer(t *testing.T) *Server {
 func authenticatedJSONRequest(method, path, body string) *http.Request {
 	req := httptest.NewRequest(method, path, bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.AddCookie(&http.Cookie{Name: "session", Value: newSession()})
+	token := newSession()
+	req.Header.Set("X-CSRF-Token", token)
+	req.AddCookie(&http.Cookie{Name: "session", Value: token})
 	return req
+}
+
+func resetWebUISecurityState() {
+	sessionsMu.Lock()
+	sessions = make(map[string]time.Time)
+	sessionsMu.Unlock()
+	loginAttemptsMu.Lock()
+	loginAttempts = make(map[string]loginAttempt)
+	loginAttemptsMu.Unlock()
+}
+
+func sha256Hex(value string) string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(value)))
+}
+
+func insertWebUITestProxy(t *testing.T, store *storage.Storage, address string, region string, status string) {
+	t.Helper()
+	if err := store.AddManualProxy(address, "http", region, ""); err != nil {
+		t.Fatalf("AddManualProxy(%s) error = %v", address, err)
+	}
+	if status == "disabled" {
+		if err := store.DisableProxy(address); err != nil {
+			t.Fatalf("DisableProxy(%s) error = %v", address, err)
+		}
+	}
+}
+
+func serveLogin(t *testing.T, server *Server, password string, remoteAddr string, https bool) *httptest.ResponseRecorder {
+	t.Helper()
+	target := "http://example.test/login"
+	if https {
+		target = "https://example.test/login"
+	}
+	req := httptest.NewRequest(http.MethodPost, target, strings.NewReader("password="+urlQueryEscape(password)))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.RemoteAddr = remoteAddr
+	rec := httptest.NewRecorder()
+
+	server.routes().ServeHTTP(rec, req)
+	return rec
+}
+
+func urlQueryEscape(value string) string {
+	return strings.NewReplacer("%", "%25", "+", "%2B", "&", "%26", "=", "%3D", " ", "+").Replace(value)
+}
+
+func findCookie(t *testing.T, cookies []*http.Cookie, name string) *http.Cookie {
+	t.Helper()
+	for _, cookie := range cookies {
+		if cookie.Name == name {
+			return cookie
+		}
+	}
+	t.Fatalf("cookie %q not found in %#v", name, cookies)
+	return nil
 }
 
 func serveAuthenticated(t *testing.T, server *Server, path, body string, status int) {
@@ -395,6 +662,170 @@ func setTestGlobalConfig(t *testing.T, cfg *config.Config) {
 	}
 }
 
+// TestSubscriptionsAPIReportsPausedCount 覆盖 BUG-52 后端：/api/subscriptions
+// 为每个订阅返回 paused_count，且该值来自 CountPausedBySubscriptionID(user_paused=1 计数)，
+// 与 active_count / disabled_count 相互独立。
+func TestSubscriptionsAPIReportsPausedCount(t *testing.T) {
+	server := newTestServer(t)
+
+	subID, err := server.storage.AddSubscription("sub-a", "https://example.test/a", "", "auto", 60)
+	if err != nil {
+		t.Fatalf("AddSubscription() error = %v", err)
+	}
+
+	// 三个订阅节点：其中两个被用户暂停(user_paused=1)。
+	addrs := []string{"203.0.113.1:8080", "203.0.113.2:8080", "203.0.113.3:8080"}
+	for _, addr := range addrs {
+		if err := server.storage.AddProxyWithSource(addr, "http", storage.SourceSubscription, subID); err != nil {
+			t.Fatalf("AddProxyWithSource(%s) error = %v", addr, err)
+		}
+	}
+	admin, err := server.storage.GetAllForAdmin()
+	if err != nil {
+		t.Fatalf("GetAllForAdmin() error = %v", err)
+	}
+	pausedTargets := map[string]bool{"203.0.113.1:8080": true, "203.0.113.2:8080": true}
+	pausedIDs := 0
+	for _, p := range admin {
+		if pausedTargets[p.Address] {
+			if err := server.storage.PauseProxyByID(p.ID); err != nil {
+				t.Fatalf("PauseProxyByID(%d) error = %v", p.ID, err)
+			}
+			pausedIDs++
+		}
+	}
+	if pausedIDs != 2 {
+		t.Fatalf("expected to pause 2 proxies, paused %d", pausedIDs)
+	}
+
+	req := authenticatedJSONRequest(http.MethodGet, "/api/subscriptions", "")
+	rec := httptest.NewRecorder()
+	server.routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var subs []struct {
+		ID            int64 `json:"id"`
+		ActiveCount   int   `json:"active_count"`
+		DisabledCount int   `json:"disabled_count"`
+		PausedCount   int   `json:"paused_count"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &subs); err != nil {
+		t.Fatalf("unmarshal response: %v; body=%s", err, rec.Body.String())
+	}
+	if len(subs) != 1 {
+		t.Fatalf("expected 1 subscription, got %d; body=%s", len(subs), rec.Body.String())
+	}
+	got := subs[0]
+	if got.PausedCount != 2 {
+		t.Fatalf("paused_count = %d, want 2; body=%s", got.PausedCount, rec.Body.String())
+	}
+	// 只有 1 个未暂停的 active 节点应计入 active_count。
+	if got.ActiveCount != 1 {
+		t.Fatalf("active_count = %d, want 1; body=%s", got.ActiveCount, rec.Body.String())
+	}
+	if got.DisabledCount != 0 {
+		t.Fatalf("disabled_count = %d, want 0; body=%s", got.DisabledCount, rec.Body.String())
+	}
+
+	// paused_count 字段必须实际出现在返回的 JSON 里（前端依赖它）。
+	if !strings.Contains(rec.Body.String(), "\"paused_count\"") {
+		t.Fatalf("response missing paused_count field: %s", rec.Body.String())
+	}
+}
+
+// TestLoginClientKeyPrefersForwardedForFirstSegment 覆盖 BUG-57：
+// 存在 X-Forwarded-For 时按其首段计数（反代场景下区分真实客户端），
+// 不存在时回退到 RemoteAddr 的 host。
+func TestLoginClientKeyPrefersForwardedForFirstSegment(t *testing.T) {
+	cases := []struct {
+		name       string
+		xff        string
+		remoteAddr string
+		want       string
+	}{
+		{
+			name:       "xff multi segment uses first",
+			xff:        "198.51.100.7, 10.0.0.1, 10.0.0.2",
+			remoteAddr: "10.0.0.9:5555",
+			want:       "198.51.100.7",
+		},
+		{
+			name:       "xff single segment",
+			xff:        "203.0.113.42",
+			remoteAddr: "10.0.0.9:5555",
+			want:       "203.0.113.42",
+		},
+		{
+			name:       "no xff falls back to remoteaddr host",
+			xff:        "",
+			remoteAddr: "192.0.2.50:44321",
+			want:       "192.0.2.50",
+		},
+		{
+			name:       "empty xff falls back to remoteaddr host",
+			xff:        "   ",
+			remoteAddr: "192.0.2.51:1",
+			want:       "192.0.2.51",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/login", nil)
+			req.RemoteAddr = tc.remoteAddr
+			if tc.xff != "" {
+				req.Header.Set("X-Forwarded-For", tc.xff)
+			}
+			if got := loginClientKey(req); got != tc.want {
+				t.Fatalf("loginClientKey() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestLoginRateLimitDistinguishesForwardedForClients 端到端验证 BUG-57：
+// 反代之后，不同真实客户端（不同 XFF 首段）即使 RemoteAddr 相同也应被独立限速，
+// 一个被锁定不影响另一个。
+func TestLoginRateLimitDistinguishesForwardedForClients(t *testing.T) {
+	server := newTestServer(t)
+	server.cfg.WebUIPasswordHash = sha256Hex("correct")
+
+	const proxyRemote = "10.0.0.9:5555" // 所有请求经同一反代，RemoteAddr 相同。
+
+	for i := 0; i < maxLoginFailures; i++ {
+		rec := serveLoginXFF(t, server, "wrong", proxyRemote, "198.51.100.20")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("failure %d status = %d, want %d", i+1, rec.Code, http.StatusOK)
+		}
+	}
+
+	// 同一 XFF 客户端应被锁定。
+	locked := serveLoginXFF(t, server, "correct", proxyRemote, "198.51.100.20")
+	if locked.Code != http.StatusTooManyRequests {
+		t.Fatalf("locked status = %d, want %d", locked.Code, http.StatusTooManyRequests)
+	}
+
+	// 不同 XFF 客户端（相同反代 RemoteAddr）不应被误锁。
+	other := serveLoginXFF(t, server, "correct", proxyRemote, "198.51.100.21")
+	if other.Code != http.StatusFound {
+		t.Fatalf("other XFF client status = %d, want %d; body=%s", other.Code, http.StatusFound, other.Body.String())
+	}
+}
+
+func serveLoginXFF(t *testing.T, server *Server, password, remoteAddr, xff string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "http://example.test/login", strings.NewReader("password="+urlQueryEscape(password)))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.RemoteAddr = remoteAddr
+	if xff != "" {
+		req.Header.Set("X-Forwarded-For", xff)
+	}
+	rec := httptest.NewRecorder()
+	server.routes().ServeHTTP(rec, req)
+	return rec
+}
+
 func sortedKeys(values map[string]any) []string {
 	keys := make([]string, 0, len(values))
 	for key := range values {
@@ -420,4 +851,7 @@ func assertConfigJSONOmitsLegacyFields(t *testing.T, path string) {
 		t.Fatalf("read config file: %v", err)
 	}
 	assertNoLegacyConfigFields(t, string(data))
+	if strings.Contains(string(data), "proxy_auth_password\"") {
+		t.Fatalf("config persisted plain proxy password field: %s", string(data))
+	}
 }

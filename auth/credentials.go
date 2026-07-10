@@ -18,3 +18,10 @@ func VerifyPlainPassword(base string, password string, expectedBase string, expe
 	passwordMatch := subtle.ConstantTimeCompare([]byte(password), []byte(expectedPassword)) == 1
 	return baseMatch && passwordMatch
 }
+
+func VerifyPassword(base string, password string, expectedBase string, expectedPassword string, expectedHash string) bool {
+	if expectedHash != "" {
+		return VerifyPasswordHash(base, password, expectedBase, expectedHash)
+	}
+	return VerifyPlainPassword(base, password, expectedBase, expectedPassword)
+}

@@ -11,7 +11,8 @@ func (s *Storage) GetRandom() (*Proxy, error) {
 	rows, err := s.db.Query(
 		`SELECT ` + proxyColumns + `
 		 FROM proxies
-		 WHERE status = 'active' AND fail_count < 3
+		 WHERE status = 'active' AND user_paused = 0 AND fail_count < 3
+		   AND NOT EXISTS (SELECT 1 FROM subscriptions WHERE subscriptions.id = proxies.subscription_id AND subscriptions.status = 'paused')
 		 ORDER BY
 		   CASE quality_grade
 		     WHEN 'S' THEN 1
@@ -64,7 +65,8 @@ func (s *Storage) GetAllForAdmin() ([]Proxy, error) {
 func (s *Storage) GetAllFiltered(sourceFilter string) ([]Proxy, error) {
 	query := `SELECT ` + proxyColumns + `
 		 FROM proxies
-		 WHERE status IN ('active', 'degraded') AND fail_count < 3`
+		 WHERE status IN ('active', 'degraded') AND user_paused = 0 AND fail_count < 3
+		   AND NOT EXISTS (SELECT 1 FROM subscriptions WHERE subscriptions.id = proxies.subscription_id AND subscriptions.status = 'paused')`
 	var args []interface{}
 	if sourceFilter != "" {
 		query += ` AND source = ?`
@@ -214,7 +216,8 @@ func (s *Storage) GetLowestLatencyByProtocolExcludeFiltered(protocol string, exc
 func (s *Storage) GetBatchForHealthCheck(batchSize int, skipSGrade bool) ([]Proxy, error) {
 	query := `SELECT ` + proxyColumns + `
 		 FROM proxies
-		 WHERE status IN ('active', 'degraded') AND fail_count < 3`
+		 WHERE status IN ('active', 'degraded') AND user_paused = 0 AND fail_count < 3
+		   AND NOT EXISTS (SELECT 1 FROM subscriptions WHERE subscriptions.id = proxies.subscription_id AND subscriptions.status = 'paused')`
 
 	if skipSGrade {
 		query += ` AND quality_grade != 'S'`
@@ -247,7 +250,8 @@ func (s *Storage) GetByProtocol(protocol string) ([]Proxy, error) {
 	rows, err := s.db.Query(
 		`SELECT `+proxyColumns+`
 		 FROM proxies
-		 WHERE status IN ('active', 'degraded') AND fail_count < 3 AND protocol = ?
+		 WHERE status IN ('active', 'degraded') AND user_paused = 0 AND fail_count < 3 AND protocol = ?
+		   AND NOT EXISTS (SELECT 1 FROM subscriptions WHERE subscriptions.id = proxies.subscription_id AND subscriptions.status = 'paused')
 		 ORDER BY latency ASC`, protocol,
 	)
 	if err != nil {

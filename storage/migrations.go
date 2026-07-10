@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"database/sql"
 	"fmt"
 	"log"
 	"strings"
@@ -44,6 +45,8 @@ func (s *Storage) migrateRequiredProxyColumns() error {
 		{name: "last_check", sql: `ALTER TABLE proxies ADD COLUMN last_check DATETIME`},
 		{name: "created_at", sql: `ALTER TABLE proxies ADD COLUMN created_at DATETIME NOT NULL DEFAULT '1970-01-01 00:00:00'`},
 		{name: "status", sql: `ALTER TABLE proxies ADD COLUMN status TEXT NOT NULL DEFAULT 'active'`},
+		{name: "user_paused", sql: `ALTER TABLE proxies ADD COLUMN user_paused INTEGER NOT NULL DEFAULT 0`},
+		{name: "source", sql: `ALTER TABLE proxies ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'`},
 		{name: "subscription_id", sql: `ALTER TABLE proxies ADD COLUMN subscription_id INTEGER NOT NULL DEFAULT 0`},
 	}
 
@@ -51,6 +54,189 @@ func (s *Storage) migrateRequiredProxyColumns() error {
 		if err := s.addProxyColumnIfMissing(column.name, column.sql); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// migrateProxyIdentity 将旧身份模型迁移到 (address, source, subscription_id)。
+// 所有步骤在单一事务内执行，中途失败整体回滚，避免半迁移态；
+// 每条语句都写成幂等形式，二次启动安全（匹配零行即无操作）。
+func (s *Storage) migrateProxyIdentity() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`UPDATE proxies SET source = ? WHERE source = ?`, SourceSubscription, legacySourceCustom); err != nil {
+		return fmt.Errorf("normalize proxy legacy source: %w", err)
+	}
+	if _, err := tx.Exec(`UPDATE proxies SET source = ? WHERE source IN ('', 'free')`, SourceManual); err != nil {
+		return fmt.Errorf("normalize proxy empty source: %w", err)
+	}
+	if _, err := tx.Exec(`UPDATE proxies SET subscription_id = 0 WHERE source != ?`, SourceSubscription); err != nil {
+		return fmt.Errorf("normalize manual proxy subscription_id: %w", err)
+	}
+	if err := s.assignLegacySubscriptionID(tx); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE proxies SET status = 'active', user_paused = 1 WHERE status = 'paused'`); err != nil {
+		return fmt.Errorf("migrate proxy paused state: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM proxies WHERE id NOT IN (SELECT MIN(id) FROM proxies GROUP BY address, source, subscription_id)`); err != nil {
+		return fmt.Errorf("dedupe proxy identities: %w", err)
+	}
+	return tx.Commit()
+}
+
+func (s *Storage) assignLegacySubscriptionID(tx *sql.Tx) error {
+	var count int
+	err := tx.QueryRow(`SELECT COUNT(*) FROM proxies WHERE source = ? AND subscription_id <= 0`, SourceSubscription).Scan(&count)
+	if err != nil {
+		return fmt.Errorf("count legacy subscription proxies: %w", err)
+	}
+	if count == 0 {
+		return nil
+	}
+	res, err := tx.Exec(`INSERT INTO subscriptions (name, format, refresh_min, status) VALUES ('Migrated subscription', 'auto', 60, 'active')`)
+	if err != nil {
+		return fmt.Errorf("create migrated subscription: %w", err)
+	}
+	legacySubID, err := res.LastInsertId()
+	if err != nil {
+		return fmt.Errorf("read migrated subscription id: %w", err)
+	}
+	if _, err := tx.Exec(`UPDATE proxies SET subscription_id = ? WHERE source = ? AND subscription_id <= 0`, legacySubID, SourceSubscription); err != nil {
+		return fmt.Errorf("assign migrated subscription id: %w", err)
+	}
+	return nil
+}
+
+func (s *Storage) rebuildProxiesWithoutAddressUnique() error {
+	var uniqueAddress int
+	err := s.db.QueryRow(`
+		SELECT COUNT(*)
+		FROM pragma_index_list('proxies')
+		WHERE origin = 'u' AND name = 'sqlite_autoindex_proxies_1'`).Scan(&uniqueAddress)
+	if err != nil {
+		return fmt.Errorf("check proxy address unique index: %w", err)
+	}
+	if uniqueAddress == 0 {
+		return nil
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`
+		CREATE TABLE proxies_new (
+			id              INTEGER PRIMARY KEY AUTOINCREMENT,
+			address         TEXT NOT NULL,
+			protocol        TEXT NOT NULL,
+			region          TEXT NOT NULL DEFAULT '',
+			region_source   TEXT NOT NULL DEFAULT '',
+			note            TEXT NOT NULL DEFAULT '',
+			exit_ip         TEXT NOT NULL DEFAULT '',
+			exit_location   TEXT NOT NULL DEFAULT '',
+			latency         INTEGER NOT NULL DEFAULT 0,
+			quality_grade   TEXT NOT NULL DEFAULT 'C',
+			use_count       INTEGER NOT NULL DEFAULT 0,
+			success_count   INTEGER NOT NULL DEFAULT 0,
+			fail_count      INTEGER NOT NULL DEFAULT 0,
+			last_used       DATETIME,
+			last_check      DATETIME,
+			created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			status          TEXT NOT NULL DEFAULT 'active',
+			user_paused     INTEGER NOT NULL DEFAULT 0,
+			source          TEXT NOT NULL DEFAULT 'manual',
+			subscription_id INTEGER NOT NULL DEFAULT 0
+		)`); err != nil {
+		return fmt.Errorf("create proxies_new: %w", err)
+	}
+	if _, err := tx.Exec(`
+		INSERT INTO proxies_new (
+			id, address, protocol, region, region_source, note, exit_ip, exit_location,
+			latency, quality_grade, use_count, success_count, fail_count, last_used,
+			last_check, created_at, status, user_paused, source, subscription_id
+		)
+		SELECT id, address, protocol, region, region_source, note, exit_ip, exit_location,
+			latency, quality_grade, use_count, success_count, fail_count, last_used,
+			last_check, created_at, status, user_paused, source, subscription_id
+		FROM proxies`); err != nil {
+		return fmt.Errorf("copy proxies_new: %w", err)
+	}
+	if _, err := tx.Exec(`DROP TABLE proxies`); err != nil {
+		return fmt.Errorf("drop old proxies: %w", err)
+	}
+	if _, err := tx.Exec(`ALTER TABLE proxies_new RENAME TO proxies`); err != nil {
+		return fmt.Errorf("rename proxies_new: %w", err)
+	}
+	return tx.Commit()
+}
+
+// migrateSubscriptionIdentity 去重订阅（url / file_path），并把被删订阅下的代理
+// 重定位到保留订阅。两个字段的去重在单一事务内执行，中途失败整体回滚，
+// 避免出现「代理已重定位但重复订阅未删」或反之的半迁移态。语句幂等，二次启动安全。
+func (s *Storage) migrateSubscriptionIdentity() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if err := dedupeSubscriptionsByField(tx, "url"); err != nil {
+		return err
+	}
+	if err := dedupeSubscriptionsByField(tx, "file_path"); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func dedupeSubscriptionsByField(tx *sql.Tx, field string) error {
+	if field != "url" && field != "file_path" {
+		return fmt.Errorf("unsupported subscription dedupe field: %s", field)
+	}
+	remapSQL := fmt.Sprintf(`
+		UPDATE proxies
+		SET subscription_id = (
+			SELECT MIN(kept.id)
+			FROM subscriptions kept
+			WHERE kept.%[1]s = (SELECT dup.%[1]s FROM subscriptions dup WHERE dup.id = proxies.subscription_id)
+			  AND kept.%[1]s != ''
+		)
+		WHERE subscription_id IN (
+			SELECT id FROM subscriptions WHERE %[1]s != ''
+		)
+		  AND subscription_id NOT IN (
+			SELECT MIN(id) FROM subscriptions WHERE %[1]s != '' GROUP BY %[1]s
+		)`, field)
+	if _, err := tx.Exec(remapSQL); err != nil {
+		return fmt.Errorf("remap duplicate subscription %s proxies: %w", field, err)
+	}
+	deleteSQL := fmt.Sprintf(`
+		DELETE FROM subscriptions
+		WHERE %[1]s != ''
+		  AND id NOT IN (SELECT MIN(id) FROM subscriptions WHERE %[1]s != '' GROUP BY %[1]s)`, field)
+	if _, err := tx.Exec(deleteSQL); err != nil {
+		return fmt.Errorf("dedupe subscription %s values: %w", field, err)
+	}
+	return nil
+}
+
+func isUniqueConstraintError(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "unique constraint")
+}
+
+func requireRowsAffected(rowsAffected int64, err error) error {
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return sql.ErrNoRows
 	}
 	return nil
 }

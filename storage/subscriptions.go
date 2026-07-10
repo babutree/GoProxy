@@ -7,43 +7,49 @@ import (
 
 // AddSubscription 添加订阅（自动去重：相同 URL 或 file_path 不重复添加）
 func (s *Storage) AddSubscription(name, url, filePath, format string, refreshMin int) (int64, error) {
-	// 去重检查
-	if url != "" {
-		var existID int64
-		err := s.db.QueryRow(`SELECT id FROM subscriptions WHERE url = ? AND url != ''`, url).Scan(&existID)
-		if err == nil {
-			return 0, fmt.Errorf("该订阅 URL 已存在")
-		}
-	}
-	if filePath != "" {
-		var existID int64
-		err := s.db.QueryRow(`SELECT id FROM subscriptions WHERE file_path = ? AND file_path != ''`, filePath).Scan(&existID)
-		if err == nil {
-			return 0, fmt.Errorf("该订阅文件已存在")
-		}
-	}
-
 	res, err := s.db.Exec(
 		`INSERT INTO subscriptions (name, url, file_path, format, refresh_min) VALUES (?, ?, ?, ?, ?)`,
 		name, url, filePath, format, refreshMin,
 	)
 	if err != nil {
+		if isUniqueConstraintError(err) {
+			return 0, fmt.Errorf("订阅 URL 或文件已存在")
+		}
 		return 0, err
 	}
 	return res.LastInsertId()
 }
 
 // CountBySubscriptionID 统计指定订阅的可用/禁用代理数
-func (s *Storage) CountBySubscriptionID(subID int64) (active int, disabled int) {
-	s.db.QueryRow(
-		`SELECT COUNT(*) FROM proxies WHERE subscription_id = ? AND status IN ('active', 'degraded') AND fail_count < 3`,
+func (s *Storage) CountBySubscriptionID(subID int64) (active int, disabled int, err error) {
+	err = s.db.QueryRow(
+		`SELECT COUNT(*) FROM proxies
+		 WHERE subscription_id = ? AND status IN ('active', 'degraded') AND user_paused = 0 AND fail_count < 3
+		   AND NOT EXISTS (SELECT 1 FROM subscriptions WHERE subscriptions.id = proxies.subscription_id AND subscriptions.status = 'paused')`,
 		subID,
 	).Scan(&active)
-	s.db.QueryRow(
+	if err != nil {
+		return 0, 0, err
+	}
+	err = s.db.QueryRow(
 		`SELECT COUNT(*) FROM proxies WHERE subscription_id = ? AND status = 'disabled'`,
 		subID,
 	).Scan(&disabled)
 	return
+}
+
+// CountPausedBySubscriptionID 统计指定订阅下被用户暂停（user_paused=1）的节点数。
+// 只按节点级 user_paused 标志计数，与订阅级 subscriptions.status='paused' 无关。
+func (s *Storage) CountPausedBySubscriptionID(subID int64) (int, error) {
+	var paused int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM proxies WHERE subscription_id = ? AND user_paused = 1`,
+		subID,
+	).Scan(&paused)
+	if err != nil {
+		return 0, err
+	}
+	return paused, nil
 }
 
 // AddContributedSubscription 添加访客贡献的订阅
@@ -63,6 +69,9 @@ func (s *Storage) AddContributedSubscription(name, url string, refreshMin int) (
 		name, url, refreshMin,
 	)
 	if err != nil {
+		if isUniqueConstraintError(err) {
+			return 0, fmt.Errorf("该订阅 URL 已存在")
+		}
 		return 0, err
 	}
 	return res.LastInsertId()
@@ -70,17 +79,37 @@ func (s *Storage) AddContributedSubscription(name, url string, refreshMin int) (
 
 // UpdateSubscription 更新订阅
 func (s *Storage) UpdateSubscription(id int64, name, url, filePath, format string, refreshMin int) error {
-	_, err := s.db.Exec(
+	res, err := s.db.Exec(
 		`UPDATE subscriptions SET name = ?, url = ?, file_path = ?, format = ?, refresh_min = ? WHERE id = ?`,
 		name, url, filePath, format, refreshMin, id,
 	)
-	return err
+	if isUniqueConstraintError(err) {
+		return fmt.Errorf("订阅 URL 或文件已存在")
+	}
+	if err != nil {
+		return err
+	}
+	return requireRowsAffected(res.RowsAffected())
 }
 
 // DeleteSubscription 删除订阅
 func (s *Storage) DeleteSubscription(id int64) error {
-	_, err := s.db.Exec(`DELETE FROM subscriptions WHERE id = ?`, id)
-	return err
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM proxies WHERE subscription_id = ? AND source = ?`, id, SourceSubscription); err != nil {
+		return err
+	}
+	res, err := tx.Exec(`DELETE FROM subscriptions WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	if err := requireRowsAffected(res.RowsAffected()); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // GetSubscriptions 获取所有订阅
@@ -189,21 +218,6 @@ func (s *Storage) ToggleSubscription(id int64) (string, error) {
 		return "", err
 	}
 
-	// 联动节点：暂停→paused（用户主动暂停，区别于验证失败的 disabled）；
-	// 启用→将 paused 节点恢复为 active 并重置失败计数（不动验证失败的 disabled 节点）。
-	if newStatus == "paused" {
-		if _, err := tx.Exec(`UPDATE proxies SET status = 'paused' WHERE subscription_id = ? AND status != 'disabled'`, id); err != nil {
-			return "", err
-		}
-	} else {
-		if _, err := tx.Exec(
-			`UPDATE proxies SET status = 'active', fail_count = 0 WHERE subscription_id = ? AND status = 'paused'`,
-			id,
-		); err != nil {
-			return "", err
-		}
-	}
-
 	if err := tx.Commit(); err != nil {
 		return "", err
 	}
@@ -212,8 +226,11 @@ func (s *Storage) ToggleSubscription(id int64) (string, error) {
 
 // PauseSubscription 暂停订阅但保留订阅和节点记录。
 func (s *Storage) PauseSubscription(id int64) error {
-	_, err := s.db.Exec(`UPDATE subscriptions SET status = 'paused' WHERE id = ?`, id)
-	return err
+	res, err := s.db.Exec(`UPDATE subscriptions SET status = 'paused' WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	return requireRowsAffected(res.RowsAffected())
 }
 
 // scanSubscription 扫描订阅行数据

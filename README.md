@@ -150,7 +150,7 @@ The examples below use the base username `acct` and password `change-me` as plac
 ### HTTP proxy (plain HTTP target)
 
 ```bash
-curl -x http://acct-region-us:change-me@localhost:7802 http://httpbin.org/ip
+curl -x http://acct-region-us:change-me@localhost:7802 http://example.com/
 ```
 
 ### HTTP proxy (HTTPS target, via CONNECT tunnel)
@@ -158,7 +158,7 @@ curl -x http://acct-region-us:change-me@localhost:7802 http://httpbin.org/ip
 An HTTPS target goes through the proxy as a `CONNECT` tunnel. The proxy credentials are sent in the `Proxy-Authorization` header; the DSL suffix stays in the username.
 
 ```bash
-curl -x http://acct-region-us:change-me@localhost:7802 https://httpbin.org/ip
+curl -x http://acct-region-us:change-me@localhost:7802 https://www.gstatic.com/generate_204
 ```
 
 ### SOCKS5 proxy (works for both HTTP and HTTPS targets)
@@ -167,19 +167,19 @@ SOCKS5 tunnels raw TCP, so the same command works whether the target is HTTP or 
 
 ```bash
 # Credentials embedded in the proxy string
-curl --socks5 acct-region-jp-session-browser:change-me@localhost:7801 https://httpbin.org/ip
+curl --socks5 acct-region-jp-session-browser:change-me@localhost:7801 https://www.gstatic.com/generate_204
 
 # Equivalent, using -x with the socks5:// scheme
-curl -x socks5://acct-region-jp-session-browser:change-me@localhost:7801 https://httpbin.org/ip
+curl -x socks5://acct-region-jp-session-browser:change-me@localhost:7801 https://www.gstatic.com/generate_204
 
 # Equivalent, passing credentials separately
-curl --socks5 localhost:7801 -U acct-region-jp-session-browser:change-me https://httpbin.org/ip
+curl --socks5 localhost:7801 -U acct-region-jp-session-browser:change-me https://www.gstatic.com/generate_204
 ```
 
 To resolve the target hostname at the exit node instead of locally, use the `socks5h` scheme:
 
 ```bash
-curl -x socks5h://acct-region-us:change-me@localhost:7801 https://httpbin.org/ip
+curl -x socks5h://acct-region-us:change-me@localhost:7801 https://www.gstatic.com/generate_204
 ```
 
 > When authentication is enabled, a client that offers no credentials is rejected during the SOCKS5 handshake (no acceptable method), and HTTP requests receive `407 Proxy Authentication Required`.
@@ -246,6 +246,10 @@ The first-boot credentials are printed to the log only once. If you missed them,
 you cannot recover the WebUI password (only its hash is stored), but you can
 reset it without losing subscriptions or other settings.
 
+The default Docker Compose deployment bind-mounts host `./data` to container
+`/app/data`. The persisted files below therefore live under `./data` beside
+`docker-compose.yml` unless you override `HOST_DATA_DIR`.
+
 Reset only the WebUI password (keeps username, filters, and all subscription
 nodes). This removes the stored hash so the next start regenerates and prints a
 new WebUI password:
@@ -285,12 +289,39 @@ Existing legacy rows using old source values are migrated into the current `manu
 
 This fork must be deployed from the local source tree. Do not deploy the upstream `isboyjc/goproxy` container image for this geo-gateway build.
 
+Published image names for this fork are:
+
+| Registry | Image |
+|----------|-------|
+| GHCR | `ghcr.io/babutree/goproxy` |
+| Docker Hub | `docker.io/babutree/goproxy` |
+
 Docker Compose builds the local `Dockerfile` by default:
 
 ```bash
 cp .env.example .env
 docker compose up -d --build
 ```
+
+By default, compose writes runtime data to host `./data` and sets the container
+application data directory to `/app/data`. Override the host path with
+`HOST_DATA_DIR=/absolute/or/relative/path`; do not change the container
+`DATA_DIR=/app/data` unless you also change the volume target.
+
+If `docker images` shows extra `<none>` entries after local rebuilds, first
+confirm the tagged final image exists with `docker image ls goproxy-geo`. The
+`<none>` entries are usually dangling build cache or superseded local image
+layers from multi-stage rebuilds, not an alternate deployable image. On a Docker
+host, inspect and clean them explicitly when needed:
+
+```bash
+docker image ls --filter dangling=true
+docker image prune
+docker builder prune
+```
+
+This repository sets the compose build target to the final `runtime` stage, but
+local dangling-image behavior still depends on the Docker builder and cache mode.
 
 Security recommendations:
 

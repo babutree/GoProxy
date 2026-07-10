@@ -179,11 +179,11 @@ func (m *Manager) probeDisabled() {
 			// 检查地理过滤：恢复前确认不在屏蔽列表中
 			if exitLocation != "" && isGeoBlocked(exitLocation, cfg) {
 				log.Printf("[custom] 代理 %s 验证通过但被地理过滤 (%s)，保持禁用", proxy.Address, exitLocation)
-				m.storage.UpdateExitInfo(proxy.Address, exitIP, exitLocation, int(latency.Milliseconds()))
+				m.storage.UpdateSubscriptionProxyExitInfo(proxy.Address, proxy.SubscriptionID, exitIP, exitLocation, int(latency.Milliseconds()))
 				continue
 			}
-			m.storage.EnableProxy(proxy.Address)
-			m.storage.UpdateExitInfo(proxy.Address, exitIP, exitLocation, int(latency.Milliseconds()))
+			m.storage.EnableSubscriptionProxy(proxy.Address, proxy.SubscriptionID)
+			m.storage.UpdateSubscriptionProxyExitInfo(proxy.Address, proxy.SubscriptionID, exitIP, exitLocation, int(latency.Milliseconds()))
 			recovered++
 			recoveredSubs[proxy.SubscriptionID] = true
 			log.Printf("[custom] ✅ 代理 %s 恢复可用 (%dms)", proxy.Address, latency.Milliseconds())
@@ -230,12 +230,6 @@ func (m *Manager) RefreshSubscription(subID int64) error {
 
 	log.Printf("[custom] 订阅 [%s] 解析到 %d 个节点", sub.Name, len(nodes))
 
-	// 先删除该订阅的旧代理
-	oldDeleted, _ := m.storage.DeleteBySubscriptionID(subID)
-	if oldDeleted > 0 {
-		log.Printf("[custom] 🧹 清理订阅 [%s] 旧代理 %d 个", sub.Name, oldDeleted)
-	}
-
 	// 分类节点
 	var directNodes []ParsedNode
 	var tunnelNodes []ParsedNode
@@ -249,19 +243,9 @@ func (m *Manager) RefreshSubscription(subID int64) error {
 
 	// 收集所有入池的代理（带正确的协议信息）
 	var allProxies []storage.Proxy
+	var tunnelAddrs []string
 
-	// 处理可直接使用的 HTTP/SOCKS5 节点
-	for _, node := range directNodes {
-		addr := node.DirectAddress()
-		proto := node.DirectProtocol()
-		m.storage.AddProxyWithSource(addr, proto, storage.SourceSubscription, subID)
-		allProxies = append(allProxies, storage.Proxy{Address: addr, Protocol: proto, Source: storage.SourceSubscription})
-	}
-	if len(directNodes) > 0 {
-		log.Printf("[custom] 📥 %d 个 HTTP/SOCKS5 节点直接入池", len(directNodes))
-	}
-
-	// 处理需要 sing-box 转换的节点
+	// 先重载 tunnel；失败时不删除该订阅旧代理，避免一次坏配置破坏旧可用配置。
 	if len(tunnelNodes) > 0 {
 		// 收集所有订阅的 tunnel 节点（需合并）
 		allTunnelNodes, err := m.collectAllTunnelNodes()
@@ -282,23 +266,50 @@ func (m *Manager) RefreshSubscription(subID int64) error {
 		}
 
 		if err := m.singbox.Reload(mergedNodes); err != nil {
-			log.Printf("[custom] ❌ sing-box 重载失败: %v", err)
+			return fmt.Errorf("sing-box 重载失败: %w", err)
 		} else {
 			portMap := m.singbox.GetPortMap()
 			for _, node := range tunnelNodes {
 				key := node.NodeKey()
 				if port, ok := portMap[key]; ok {
 					addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
-					m.storage.AddProxyWithSource(addr, "socks5", storage.SourceSubscription, subID)
-					allProxies = append(allProxies, storage.Proxy{Address: addr, Protocol: "socks5", Source: storage.SourceSubscription})
+					tunnelAddrs = append(tunnelAddrs, addr)
 				}
 			}
-			log.Printf("[custom] 📥 %d 个加密节点通过 sing-box 转换入池", len(tunnelNodes))
 		}
 	}
 
+	// 到这里才替换该订阅代理：拉取/解析/隧道重载失败都不会破坏旧可用配置。
+	oldDeleted, _ := m.storage.DeleteBySubscriptionID(subID)
+	if oldDeleted > 0 {
+		log.Printf("[custom] 🧹 清理订阅 [%s] 旧代理 %d 个", sub.Name, oldDeleted)
+	}
+
+	// 处理可直接使用的 HTTP/SOCKS5 节点。新节点先保持 disabled，验证通过后才进入 active 选路。
+	for _, node := range directNodes {
+		addr := node.DirectAddress()
+		proto := node.DirectProtocol()
+		proxy, ok := m.addPendingSubscriptionProxy(addr, proto, subID)
+		if ok {
+			allProxies = append(allProxies, *proxy)
+		}
+	}
+	if len(directNodes) > 0 {
+		log.Printf("[custom] 📥 %d 个 HTTP/SOCKS5 节点直接入池", len(directNodes))
+	}
+
+	for _, addr := range tunnelAddrs {
+		proxy, ok := m.addPendingSubscriptionProxy(addr, "socks5", subID)
+		if ok {
+			allProxies = append(allProxies, *proxy)
+		}
+	}
+	if len(tunnelAddrs) > 0 {
+		log.Printf("[custom] 📥 %d 个加密节点通过 sing-box 转换入池", len(tunnelAddrs))
+	}
+
 	// 验证新入池的代理
-	go m.validateCustomProxies(allProxies, subID)
+	m.validateCustomProxies(allProxies, subID)
 
 	// 更新订阅信息（记录实际入池的代理数）
 	m.storage.UpdateSubscriptionFetch(subID, len(allProxies))
@@ -327,12 +338,16 @@ func (m *Manager) RefreshAll() {
 
 // collectAllTunnelNodes 收集所有订阅中需要 tunnel 的节点
 func (m *Manager) collectAllTunnelNodes() ([]ParsedNode, error) {
-	subs, err := m.storage.GetSubscriptions()
-	if err != nil {
-		return nil, err
+	nodeMap := make(map[string]ParsedNode)
+	for _, node := range m.singbox.GetNodes() {
+		nodeMap[node.NodeKey()] = node
 	}
 
-	var allNodes []ParsedNode
+	subs, err := m.storage.GetSubscriptions()
+	if err != nil {
+		return mapValues(nodeMap), err
+	}
+
 	for _, sub := range subs {
 		if sub.Status != "active" {
 			continue
@@ -347,11 +362,36 @@ func (m *Manager) collectAllTunnelNodes() ([]ParsedNode, error) {
 		}
 		for _, node := range nodes {
 			if !node.IsDirect() {
-				allNodes = append(allNodes, node)
+				nodeMap[node.NodeKey()] = node
 			}
 		}
 	}
-	return allNodes, nil
+	return mapValues(nodeMap), nil
+}
+
+func mapValues(nodeMap map[string]ParsedNode) []ParsedNode {
+	nodes := make([]ParsedNode, 0, len(nodeMap))
+	for _, node := range nodeMap {
+		nodes = append(nodes, node)
+	}
+	return nodes
+}
+
+func (m *Manager) addPendingSubscriptionProxy(addr, proto string, subID int64) (*storage.Proxy, bool) {
+	if err := m.storage.AddProxyWithSource(addr, proto, storage.SourceSubscription, subID); err != nil {
+		log.Printf("[custom] ⚠️ 新增订阅代理 %s 失败: %v", addr, err)
+		return nil, false
+	}
+	if err := m.storage.DisableSubscriptionProxy(addr, subID); err != nil {
+		log.Printf("[custom] ⚠️ 将订阅代理 %s 标记为待验证失败: %v", addr, err)
+		return nil, false
+	}
+	proxy, err := m.storage.GetProxyByIdentity(addr, storage.SourceSubscription, subID)
+	if err != nil {
+		log.Printf("[custom] ⚠️ 读取订阅代理 %s 身份失败: %v", addr, err)
+		return nil, false
+	}
+	return proxy, true
 }
 
 // fetchSubscriptionData 获取订阅数据
@@ -416,18 +456,18 @@ func (m *Manager) validateCustomProxies(proxies []storage.Proxy, subID int64) in
 	for result := range resultCh {
 		if result.Valid {
 			latencyMs := int(result.Latency.Milliseconds())
-			m.storage.UpdateExitInfo(result.Proxy.Address, result.ExitIP, result.ExitLocation, latencyMs)
+			m.storage.UpdateSubscriptionProxyExitInfo(result.Proxy.Address, subID, result.ExitIP, result.ExitLocation, latencyMs)
 			// 检查地理过滤
 			if result.ExitLocation != "" && isGeoBlocked(result.ExitLocation, cfg) {
-				m.storage.DisableProxy(result.Proxy.Address)
+				m.storage.DisableSubscriptionProxy(result.Proxy.Address, subID)
 				invalid++
 			} else {
-				m.storage.EnableProxy(result.Proxy.Address)
+				m.storage.EnableSubscriptionProxy(result.Proxy.Address, subID)
 				valid++
 			}
 		} else {
 			invalid++
-			m.storage.DisableProxy(result.Proxy.Address)
+			m.storage.DisableSubscriptionProxy(result.Proxy.Address, subID)
 		}
 	}
 
@@ -445,13 +485,18 @@ func (m *Manager) GetStatus() map[string]interface{} {
 	subscriptionCount, _ := m.storage.CountBySource(storage.SourceSubscription)
 	disabled, _ := m.storage.GetDisabledCustomProxies()
 	subs, _ := m.storage.GetSubscriptions()
+	singboxStatus := m.singbox.GetRuntimeStatus()
 
 	return map[string]interface{}{
-		"singbox_running":    m.singbox.IsRunning(),
-		"singbox_nodes":      m.singbox.GetNodeCount(),
-		"subscription_count": subscriptionCount,
-		"disabled_count":     len(disabled),
-		"subscription_total": len(subs),
+		"singbox_running":     singboxStatus.Running,
+		"singbox_status":      singboxStatus.Status,
+		"singbox_reason":      singboxStatus.Reason,
+		"singbox_nodes":       singboxStatus.Nodes,
+		"singbox_ready_ports": singboxStatus.ReadyPorts,
+		"singbox_total_ports": singboxStatus.TotalPorts,
+		"subscription_count":  subscriptionCount,
+		"disabled_count":      len(disabled),
+		"subscription_total":  len(subs),
 	}
 }
 

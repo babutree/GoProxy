@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -27,11 +29,23 @@ var (
 )
 
 type Server struct {
-	storage  *storage.Storage
+	storage  proxyStore
 	cfg      *config.Config
 	port     string
 	sessions *affinity.Store
 }
+
+type proxyStore interface {
+	selector.Store
+	RecordProxyUseByID(id int64, success bool) error
+	DisableProxyByID(id int64) error
+}
+
+// failDisableThreshold 与健康检查一致：连续失败累计到该阈值即禁用节点。
+// 请求路径与健康检查路径共用同一阈值，避免请求失败只累加不禁用而产生
+// “status=active 但 fail_count>=3”的僵尸节点（被选路和健康检查同时排除、
+// 又永远得不到成功来归零）。禁用后节点在管理界面可见，可显式恢复。见 BUG-53。
+const failDisableThreshold = 3
 
 func New(s *storage.Storage, cfg *config.Config, port string) *Server {
 	return &Server{
@@ -110,10 +124,10 @@ func (s *Server) checkAuth(r *http.Request) (auth.ParsedUsername, bool) {
 	password := credentials[1]
 
 	// 验证用户名和密码
-	return parsed, auth.VerifyPasswordHash(parsed.Base, password, s.cfg.ProxyAuthUsername, s.cfg.ProxyAuthPasswordHash)
+	return parsed, auth.VerifyPassword(parsed.Base, password, s.cfg.ProxyAuthUsername, s.cfg.ProxyAuthPassword, s.cfg.ProxyAuthPasswordHash)
 }
 
-func (s *Server) selectProxy(route auth.ParsedUsername, tried []string) (*storage.Proxy, error) {
+func (s *Server) selectProxy(route auth.ParsedUsername, tried []int64) (*storage.Proxy, error) {
 	route = withDefaultRegion(route, s.cfg.DefaultRegion)
 	return selector.Resolve(s.storage, s.sessions, route, tried)
 }
@@ -126,14 +140,31 @@ func withDefaultRegion(route auth.ParsedUsername, defaultRegion string) auth.Par
 	return route
 }
 
-// removeOrDisableProxy 记录上游失败并禁用节点，避免请求失败触发隐式池管理删除。
-func removeOrDisableProxy(store *storage.Storage, p *storage.Proxy) {
-	store.DisableProxy(p.Address)
+// recordProxyFailure 记录一次失败计数；当累计失败达到阈值时禁用节点，
+// 使其从 active 转为 disabled（管理界面可见、可显式恢复），而不是停留在
+// “active 但被选路/健康检查静默排除”的僵尸态。见 BUG-53。
+// p.FailCount 是本次选路时读取的旧值，本次失败后有效计数为 p.FailCount+1，
+// 与健康检查路径 (health_checker.go) 的判断口径一致。
+func recordProxyFailure(store proxyStore, p *storage.Proxy) {
+	store.RecordProxyUseByID(p.ID, false)
+	if p.FailCount+1 >= failDisableThreshold {
+		store.DisableProxyByID(p.ID)
+	}
 }
 
 // handleHTTP 处理普通 HTTP 请求（带自动重试）
 func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request, route auth.ParsedUsername) {
-	var tried []string
+	buffered, stream, replayable, err := readReusableBody(r)
+	if err != nil {
+		http.Error(w, "read request body failed", http.StatusBadRequest)
+		return
+	}
+	// 超限流式 body：r.Body 未在 readReusableBody 内关闭，转发后统一关闭。
+	if !replayable && stream != nil {
+		defer r.Body.Close()
+	}
+
+	var tried []int64
 	for attempt := 0; attempt <= s.cfg.MaxRetry; attempt++ {
 		p, err := s.selectProxy(route, tried)
 		if err != nil {
@@ -141,27 +172,40 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request, route auth.P
 			return
 		}
 
-		tried = append(tried, p.Address)
+		tried = append(tried, p.ID)
 
 		client, err := s.buildClient(p)
 		if err != nil {
-			removeOrDisableProxy(s.storage, p)
+			recordProxyFailure(s.storage, p)
+			if !replayable {
+				// body 不可重放（已消费/流式），无法重试。
+				http.Error(w, "all proxies failed", http.StatusBadGateway)
+				return
+			}
 			continue
 		}
 
 		// 转发请求（使用完整 URL，上游代理通过 client transport 设置）
-		req, err := http.NewRequest(r.Method, r.URL.String(), r.Body)
+		req, err := http.NewRequest(r.Method, r.URL.String(), forwardBody(buffered, stream, replayable))
 		if err != nil {
 			continue
 		}
+		// 超限流式 body 长度未知，显式标记为分块传输，避免被当作 0 长度。
+		if !replayable && stream != nil {
+			req.ContentLength = -1
+		}
 		req.Header = r.Header.Clone()
-		req.Header.Del("Proxy-Connection")
+		cleanForwardHeaders(req.Header)
 
 		resp, err := client.Do(req)
 		if err != nil {
-			log.Printf("[proxy] %s via %s failed, disabling", r.RequestURI, p.Address)
-			s.storage.RecordProxyUse(p.Address, false)
-			removeOrDisableProxy(s.storage, p)
+			log.Printf("[proxy] %s via %s failed", r.RequestURI, p.Address)
+			recordProxyFailure(s.storage, p)
+			if !replayable {
+				// body 已在本次尝试中被消费，不能重放，直接失败。
+				http.Error(w, "all proxies failed", http.StatusBadGateway)
+				return
+			}
 			continue
 		}
 		defer resp.Body.Close()
@@ -174,7 +218,7 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request, route auth.P
 		}
 		w.WriteHeader(resp.StatusCode)
 		io.Copy(w, resp.Body)
-		s.storage.RecordProxyUse(p.Address, true)
+		s.storage.RecordProxyUseByID(p.ID, true)
 		if resp.StatusCode == 429 {
 			log.Printf("[proxy] ⚠️  429 %s via %s (protocol=%s)", r.RequestURI, p.Address, p.Protocol)
 		} else {
@@ -188,7 +232,7 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request, route auth.P
 
 // handleTunnel 处理 HTTPS CONNECT 隧道（带自动重试）
 func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request, route auth.ParsedUsername) {
-	var tried []string
+	var tried []int64
 	for attempt := 0; attempt <= s.cfg.MaxRetry; attempt++ {
 		p, err := s.selectProxy(route, tried)
 		if err != nil {
@@ -196,17 +240,16 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request, route auth
 			return
 		}
 
-		tried = append(tried, p.Address)
+		tried = append(tried, p.ID)
 
 		conn, err := s.dialViaProxy(p, r.Host)
 		if err != nil {
-			log.Printf("[tunnel] dial %s via %s failed, disabling", r.Host, p.Address)
-			s.storage.RecordProxyUse(p.Address, false)
-			removeOrDisableProxy(s.storage, p)
+			log.Printf("[tunnel] dial %s via %s failed", r.Host, p.Address)
+			recordProxyFailure(s.storage, p)
 			continue
 		}
 
-		s.storage.RecordProxyUse(p.Address, true)
+		s.storage.RecordProxyUseByID(p.ID, true)
 
 		// 告知客户端隧道建立
 		hijacker, ok := w.(http.Hijacker)
@@ -233,6 +276,72 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request, route auth
 	http.Error(w, "all proxies failed", http.StatusBadGateway)
 }
 
+// maxReplayBodyBytes 限制为“可重放”而缓存进内存的请求体上限。
+// 选 1 MiB：足以覆盖绝大多数普通 API / 表单 POST 的重试重放需求，同时避免
+// 任意大 body（如大文件上传）被 io.ReadAll 整体读入内存造成内存放大 / OOM，
+// 也避免持续的流式 body 在缓存阶段阻塞。超过上限的 body 退回单次流式转发
+// （不缓存、不重试）。见 BUG-54。
+const maxReplayBodyBytes = 1 << 20 // 1 MiB
+
+// readReusableBody 为转发准备请求体，返回三种形态：
+//   - 无 body：buffered=nil, stream=nil, replayable=true。
+//   - body 在 maxReplayBodyBytes 上限内：buffered 保存完整内容、replayable=true，
+//     r.Body 已在此处关闭；每次重试用 bytes.NewReader(buffered) 重放。
+//   - body 超过上限：不整体入内存，stream = (已读前缀 + 剩余 r.Body) 的单次流，
+//     replayable=false，r.Body 交由调用方关闭；该 body 只能被转发一次。
+//
+// 关键点：最多只预读 maxReplayBodyBytes+1 字节即可判定是否超限，超限 body 绝不
+// 被整体读入内存。
+func readReusableBody(r *http.Request) (buffered []byte, stream io.Reader, replayable bool, err error) {
+	if r.Body == nil || r.Body == http.NoBody {
+		return nil, nil, true, nil
+	}
+	// 只预读到上限+1 字节：读满 (cap+1) 即说明超限。
+	prefix, err := io.ReadAll(io.LimitReader(r.Body, maxReplayBodyBytes+1))
+	if err != nil {
+		r.Body.Close()
+		return nil, nil, false, err
+	}
+	if len(prefix) <= maxReplayBodyBytes {
+		// 完整读入，可安全重放。
+		r.Body.Close()
+		return prefix, nil, true, nil
+	}
+	// 超限：前缀 + 剩余 body 拼成单次流，body 由调用方在转发后关闭。
+	return nil, io.MultiReader(bytes.NewReader(prefix), r.Body), false, nil
+}
+
+// forwardBody 为单次转发构造请求体读取器。可重放时每次返回一个新的
+// bytes.Reader（无 body 时返回 nil）；不可重放时返回底层单次流。
+func forwardBody(buffered []byte, stream io.Reader, replayable bool) io.Reader {
+	if !replayable {
+		return stream
+	}
+	if buffered == nil {
+		return nil
+	}
+	return bytes.NewReader(buffered)
+}
+
+func cleanForwardHeaders(header http.Header) {
+	for _, value := range header.Values("Connection") {
+		for _, token := range strings.Split(value, ",") {
+			header.Del(strings.TrimSpace(token))
+		}
+	}
+	for _, name := range []string{
+		"Proxy-Authorization",
+		"Proxy-Connection",
+		"Connection",
+		"Keep-Alive",
+		"TE",
+		"Trailer",
+		"Upgrade",
+	} {
+		header.Del(name)
+	}
+}
+
 func proxySelectionError(route auth.ParsedUsername, err error) string {
 	if errors.Is(err, selector.ErrNoNode) && route.Region != "" {
 		return fmt.Sprintf("no available node for region: %s", route.Region)
@@ -250,17 +359,18 @@ func (s *Server) dialViaProxy(p *storage.Proxy, host string) (net.Conn, error) {
 		}
 		// 发送 CONNECT 请求给上游 HTTP 代理
 		fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", host, host)
-		buf := make([]byte, 256)
-		n, err := conn.Read(buf)
+		reader := bufio.NewReader(conn)
+		resp, err := http.ReadResponse(reader, &http.Request{Method: http.MethodConnect})
 		if err != nil {
 			conn.Close()
 			return nil, err
 		}
-		if n < 12 {
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
 			conn.Close()
-			return nil, fmt.Errorf("short response from proxy")
+			return nil, fmt.Errorf("upstream proxy connect failed: %s", resp.Status)
 		}
-		return conn, nil
+		return &bufferedConn{Conn: conn, reader: reader}, nil
 	case "socks5":
 		dialer, err := proxy.SOCKS5("tcp", p.Address, nil, proxy.Direct)
 		if err != nil {
@@ -270,6 +380,15 @@ func (s *Server) dialViaProxy(p *storage.Proxy, host string) (net.Conn, error) {
 	default:
 		return nil, fmt.Errorf("unsupported protocol: %s", p.Protocol)
 	}
+}
+
+type bufferedConn struct {
+	net.Conn
+	reader *bufio.Reader
+}
+
+func (c *bufferedConn) Read(p []byte) (int, error) {
+	return c.reader.Read(p)
 }
 
 func (s *Server) buildClient(p *storage.Proxy) (*http.Client, error) {

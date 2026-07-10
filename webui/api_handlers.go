@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"database/sql"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -45,7 +46,8 @@ func (s *Server) apiProxies(w http.ResponseWriter, r *http.Request) {
 	// 协议筛选交由前端处理，避免停用节点从列表消失后无法再启用。
 	proxies, err := s.storage.GetAllForAdmin()
 	if err != nil {
-		jsonError(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("[webui] list proxies failed: %v", err)
+		jsonError(w, "failed to list proxies", http.StatusInternalServerError)
 		return
 	}
 
@@ -81,13 +83,28 @@ func (s *Server) apiDeleteProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
+		ID      int64  `json:"id"`
 		Address string `json:"address"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Address == "" {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || (req.ID <= 0 && req.Address == "") {
 		jsonError(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-	s.storage.Delete(req.Address)
+	var err error
+	if req.ID > 0 {
+		err = s.storage.DeleteProxyByID(req.ID)
+	} else {
+		err = s.storage.Delete(req.Address)
+	}
+	if err != nil {
+		if err == sql.ErrNoRows {
+			jsonOK(w, map[string]string{"status": "deleted"})
+			return
+		}
+		log.Printf("[webui] delete proxy failed: id=%d address=%q err=%v", req.ID, req.Address, err)
+		jsonError(w, "failed to delete proxy", http.StatusInternalServerError)
+		return
+	}
 	jsonOK(w, map[string]string{"status": "deleted"})
 }
 
@@ -98,22 +115,28 @@ func (s *Server) apiToggleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
+		ID      int64  `json:"id"`
 		Address string `json:"address"`
 		Enable  bool   `json:"enable"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Address == "" {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || (req.ID <= 0 && req.Address == "") {
 		jsonError(w, "invalid request", http.StatusBadRequest)
 		return
 	}
 	// 手动停用用 paused（区别于验证失败的 disabled），启用用 UnpauseProxy 恢复。
 	var err error
-	if req.Enable {
+	if req.ID > 0 && req.Enable {
+		err = s.storage.UnpauseProxyByID(req.ID)
+	} else if req.ID > 0 {
+		err = s.storage.PauseProxyByID(req.ID)
+	} else if req.Enable {
 		err = s.storage.UnpauseProxy(req.Address)
 	} else {
 		err = s.storage.PauseProxy(req.Address)
 	}
 	if err != nil {
-		jsonError(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("[webui] toggle proxy %q failed: %v", req.Address, err)
+		jsonError(w, "failed to toggle proxy", http.StatusInternalServerError)
 		return
 	}
 	jsonOK(w, map[string]string{"status": "toggled"})
@@ -125,26 +148,30 @@ func (s *Server) apiRefreshProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
+		ID      int64  `json:"id"`
 		Address string `json:"address"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Address == "" {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || (req.ID <= 0 && req.Address == "") {
 		jsonError(w, "invalid request", http.StatusBadRequest)
 		return
 	}
 
 	// 从数据库获取代理信息
-	proxies, err := s.storage.GetAll()
-	if err != nil {
-		jsonError(w, "failed to get proxy", http.StatusInternalServerError)
-		return
-	}
-
 	var targetProxy *storage.Proxy
-	for i := range proxies {
-		if proxies[i].Address == req.Address {
-			targetProxy = &proxies[i]
-			break
+	if req.ID > 0 {
+		proxy, err := s.storage.GetProxyByID(req.ID)
+		if err != nil {
+			jsonError(w, "proxy not found", http.StatusNotFound)
+			return
 		}
+		targetProxy = proxy
+	} else {
+		proxy, err := s.storage.GetProxyByAddress(req.Address)
+		if err != nil {
+			jsonError(w, "proxy not found", http.StatusNotFound)
+			return
+		}
+		targetProxy = proxy
 	}
 
 	if targetProxy == nil {
@@ -162,11 +189,11 @@ func (s *Server) apiRefreshProxy(w http.ResponseWriter, r *http.Request) {
 
 		if valid {
 			latencyMs := int(latency.Milliseconds())
-			s.storage.UpdateExitInfo(req.Address, exitIP, exitLocation, latencyMs)
-			log.Printf("[webui] proxy refreshed: %s latency=%dms grade=%s", req.Address, latencyMs, storage.CalculateQualityGrade(latencyMs))
+			s.storage.UpdateProxyExitInfo(targetProxy.ID, exitIP, exitLocation, latencyMs)
+			log.Printf("[webui] proxy refreshed: %s latency=%dms grade=%s", targetProxy.Address, latencyMs, storage.CalculateQualityGrade(latencyMs))
 		} else {
-			s.storage.DisableProxy(req.Address)
-			log.Printf("[webui] proxy validation failed, disabled: %s", req.Address)
+			s.storage.DisableProxyByID(targetProxy.ID)
+			log.Printf("[webui] proxy validation failed, disabled: %s", targetProxy.Address)
 		}
 	}()
 
@@ -198,10 +225,10 @@ func (s *Server) apiRefreshLatency(w http.ResponseWriter, r *http.Request) {
 		for r := range validate.ValidateStream(proxies) {
 			if r.Valid {
 				latencyMs := int(r.Latency.Milliseconds())
-				s.storage.UpdateExitInfo(r.Proxy.Address, r.ExitIP, r.ExitLocation, latencyMs)
+				s.storage.UpdateProxyExitInfo(r.Proxy.ID, r.ExitIP, r.ExitLocation, latencyMs)
 				updated++
 			} else {
-				s.storage.DisableProxy(r.Proxy.Address)
+				s.storage.DisableProxyByID(r.Proxy.ID)
 			}
 		}
 		log.Printf("[webui] latency refresh done: updated=%d", updated)

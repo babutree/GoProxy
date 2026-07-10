@@ -1,11 +1,14 @@
 package proxy
 
 import (
+	"bufio"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"net/http"
+	"strconv"
 	"time"
 
 	"goproxy/affinity"
@@ -17,7 +20,7 @@ import (
 
 // SOCKS5Server SOCKS5 协议服务器
 type SOCKS5Server struct {
-	storage  *storage.Storage
+	storage  proxyStore
 	cfg      *config.Config
 	port     string
 	sessions *affinity.Store
@@ -76,10 +79,8 @@ func (s *SOCKS5Server) handleConnection(clientConn net.Conn) {
 
 	// 带重试的连接上游代理
 	// 重试机制：只使用 SOCKS5 协议的上游代理（天然支持 HTTPS）
-	tried := []string{}
-	maxRetries := s.cfg.MaxRetry + 2 // 增加重试次数以应对质量差的代理
-
-	for attempt := 0; attempt <= maxRetries; attempt++ {
+	tried := []int64{}
+	for attempt := 0; attempt <= s.cfg.MaxRetry; attempt++ {
 		p, err := s.selectSOCKS5Proxy(route, tried)
 		if err != nil {
 			log.Printf("[socks5] no available socks5 upstream proxy: %v", err)
@@ -87,14 +88,13 @@ func (s *SOCKS5Server) handleConnection(clientConn net.Conn) {
 			return
 		}
 
-		tried = append(tried, p.Address)
+		tried = append(tried, p.ID)
 
 		// 连接上游代理
 		upstreamConn, err := s.dialViaProxy(p, target)
 		if err != nil {
-			log.Printf("[socks5] dial %s via %s (%s) failed: %v, removing", target, p.Address, p.Protocol, err)
-			s.storage.RecordProxyUse(p.Address, false)
-			removeOrDisableProxy(s.storage, p)
+			log.Printf("[socks5] dial %s via %s (%s) failed: %v", target, p.Address, p.Protocol, err)
+			recordProxyFailure(s.storage, p)
 			continue
 		}
 
@@ -104,7 +104,7 @@ func (s *SOCKS5Server) handleConnection(clientConn net.Conn) {
 			return
 		}
 
-		s.storage.RecordProxyUse(p.Address, true)
+		s.storage.RecordProxyUseByID(p.ID, true)
 		log.Printf("[socks5] %s via %s established", target, p.Address)
 
 		// 双向转发数据
@@ -122,7 +122,7 @@ func (s *SOCKS5Server) handleConnection(clientConn net.Conn) {
 }
 
 // selectSOCKS5Proxy 根据使用模式选择 SOCKS5 上游代理
-func (s *SOCKS5Server) selectSOCKS5Proxy(route auth.ParsedUsername, tried []string) (*storage.Proxy, error) {
+func (s *SOCKS5Server) selectSOCKS5Proxy(route auth.ParsedUsername, tried []int64) (*storage.Proxy, error) {
 	route = withDefaultRegion(route, s.cfg.DefaultRegion)
 	return selector.Resolve(s.storage, s.sessions, route, tried)
 }
@@ -236,7 +236,7 @@ func (s *SOCKS5Server) socks5Auth(conn net.Conn) (auth.ParsedUsername, error) {
 	password := string(buf[2+ulen+1 : 2+ulen+1+plen])
 
 	// 验证用户名和密码
-	if !auth.VerifyPlainPassword(parsed.Base, password, s.cfg.ProxyAuthUsername, s.cfg.ProxyAuthPassword) {
+	if !auth.VerifyPassword(parsed.Base, password, s.cfg.ProxyAuthUsername, s.cfg.ProxyAuthPassword, s.cfg.ProxyAuthPasswordHash) {
 		// 认证失败: [VER(1), STATUS(1)]
 		conn.Write([]byte{0x01, 0x01})
 		return auth.ParsedUsername{}, fmt.Errorf("authentication failed")
@@ -252,69 +252,71 @@ func (s *SOCKS5Server) socks5Auth(conn net.Conn) (auth.ParsedUsername, error) {
 
 // readSOCKS5Request 读取 SOCKS5 请求
 func (s *SOCKS5Server) readSOCKS5Request(conn net.Conn) (string, error) {
-	buf := make([]byte, 262)
-
 	// 读取请求: [VER(1), CMD(1), RSV(1), ATYP(1), DST.ADDR(variable), DST.PORT(2)]
-	n, err := io.ReadAtLeast(conn, buf, 4)
-	if err != nil {
+	header := make([]byte, 4)
+	if _, err := io.ReadFull(conn, header); err != nil {
 		return "", err
 	}
 
-	if buf[0] != 0x05 {
-		return "", fmt.Errorf("invalid version: %d", buf[0])
+	if header[0] != 0x05 {
+		return "", fmt.Errorf("invalid version: %d", header[0])
 	}
 
-	cmd := buf[1]
+	cmd := header[1]
 	if cmd != 0x01 { // 只支持 CONNECT
 		s.sendSOCKS5Reply(conn, 0x07) // Command not supported
 		return "", fmt.Errorf("unsupported command: %d", cmd)
 	}
 
-	atyp := buf[3]
-	var host string
-	var addrLen int
-
-	switch atyp {
-	case 0x01: // IPv4
-		addrLen = 4
-		if n < 4+addrLen+2 {
-			if _, err := io.ReadFull(conn, buf[n:4+addrLen+2]); err != nil {
-				return "", err
-			}
-		}
-		host = fmt.Sprintf("%d.%d.%d.%d", buf[4], buf[5], buf[6], buf[7])
-	case 0x03: // Domain name
-		addrLen = int(buf[4])
-		if n < 4+1+addrLen+2 {
-			if _, err := io.ReadFull(conn, buf[n:4+1+addrLen+2]); err != nil {
-				return "", err
-			}
-		}
-		host = string(buf[5 : 5+addrLen])
-	case 0x04: // IPv6
-		addrLen = 16
-		if n < 4+addrLen+2 {
-			if _, err := io.ReadFull(conn, buf[n:4+addrLen+2]); err != nil {
-				return "", err
-			}
-		}
-		// 简化处理，直接转换
-		host = net.IP(buf[4 : 4+addrLen]).String()
-	default:
+	atyp := header[3]
+	if !validSOCKS5AddressType(atyp) {
 		s.sendSOCKS5Reply(conn, 0x08) // Address type not supported
 		return "", fmt.Errorf("unsupported address type: %d", atyp)
 	}
-
-	// 读取端口
-	portOffset := 4
-	if atyp == 0x03 {
-		portOffset = 5 + addrLen
-	} else {
-		portOffset = 4 + addrLen
+	host, err := readSOCKS5Address(conn, atyp)
+	if err != nil {
+		return "", err
 	}
-	port := binary.BigEndian.Uint16(buf[portOffset : portOffset+2])
+	portBytes := make([]byte, 2)
+	if _, err := io.ReadFull(conn, portBytes); err != nil {
+		return "", err
+	}
+	port := binary.BigEndian.Uint16(portBytes)
 
-	return fmt.Sprintf("%s:%d", host, port), nil
+	return net.JoinHostPort(host, strconv.Itoa(int(port))), nil
+}
+
+func validSOCKS5AddressType(atyp byte) bool {
+	return atyp == 0x01 || atyp == 0x03 || atyp == 0x04
+}
+
+func readSOCKS5Address(conn io.Reader, atyp byte) (string, error) {
+	switch atyp {
+	case 0x01: // IPv4
+		addr := make([]byte, 4)
+		if _, err := io.ReadFull(conn, addr); err != nil {
+			return "", err
+		}
+		return net.IP(addr).String(), nil
+	case 0x03: // Domain name
+		lenBuf := make([]byte, 1)
+		if _, err := io.ReadFull(conn, lenBuf); err != nil {
+			return "", err
+		}
+		addr := make([]byte, int(lenBuf[0]))
+		if _, err := io.ReadFull(conn, addr); err != nil {
+			return "", err
+		}
+		return string(addr), nil
+	case 0x04: // IPv6
+		addr := make([]byte, 16)
+		if _, err := io.ReadFull(conn, addr); err != nil {
+			return "", err
+		}
+		return net.IP(addr).String(), nil
+	default:
+		return "", fmt.Errorf("unsupported address type: %d", atyp)
+	}
 }
 
 // sendSOCKS5Reply 发送 SOCKS5 响应
@@ -346,18 +348,12 @@ func (s *SOCKS5Server) dialViaProxy(p *storage.Proxy, target string) (net.Conn, 
 		}
 		// 发送 CONNECT 请求
 		fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
-		buf := make([]byte, 256)
-		n, err := conn.Read(buf)
+		proxiedConn, err := readHTTPConnectResponse(conn)
 		if err != nil {
 			conn.Close()
 			return nil, err
 		}
-		// 检查 HTTP 响应
-		if n < 12 || string(buf[:12]) != "HTTP/1.1 200" {
-			conn.Close()
-			return nil, fmt.Errorf("upstream proxy connect failed")
-		}
-		return conn, nil
+		return proxiedConn, nil
 
 	case "socks5":
 		// 使用 SOCKS5 代理
@@ -410,10 +406,13 @@ func (s *SOCKS5Server) dialViaProxy(p *storage.Proxy, target string) (net.Conn, 
 		}
 
 		// 添加端口
-		portNum := uint16(0)
-		fmt.Sscanf(port, "%d", &portNum)
+		portUint, err := strconv.ParseUint(port, 10, 16)
+		if err != nil {
+			proxyConn.Close()
+			return nil, err
+		}
 		portBytes := make([]byte, 2)
-		binary.BigEndian.PutUint16(portBytes, portNum)
+		binary.BigEndian.PutUint16(portBytes, uint16(portUint))
 		req = append(req, portBytes...)
 
 		if _, err := proxyConn.Write(req); err != nil {
@@ -422,15 +421,9 @@ func (s *SOCKS5Server) dialViaProxy(p *storage.Proxy, target string) (net.Conn, 
 		}
 
 		// 读取响应
-		reply := make([]byte, 10)
-		if _, err := io.ReadAtLeast(proxyConn, reply, 10); err != nil {
+		if err := readSOCKS5ConnectReply(proxyConn); err != nil {
 			proxyConn.Close()
 			return nil, err
-		}
-
-		if reply[1] != 0x00 {
-			proxyConn.Close()
-			return nil, fmt.Errorf("socks5 connect failed, code: %d", reply[1])
 		}
 
 		return proxyConn, nil
@@ -438,4 +431,38 @@ func (s *SOCKS5Server) dialViaProxy(p *storage.Proxy, target string) (net.Conn, 
 	default:
 		return nil, fmt.Errorf("unsupported protocol: %s", p.Protocol)
 	}
+}
+
+func readHTTPConnectResponse(conn net.Conn) (net.Conn, error) {
+	reader := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(reader, &http.Request{Method: http.MethodConnect})
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("upstream proxy connect failed: %s", resp.Status)
+	}
+	return &bufferedConn{Conn: conn, reader: reader}, nil
+}
+
+func readSOCKS5ConnectReply(conn io.Reader) error {
+	header := make([]byte, 4)
+	if _, err := io.ReadFull(conn, header); err != nil {
+		return err
+	}
+	if header[0] != 0x05 {
+		return fmt.Errorf("invalid socks5 reply version: %d", header[0])
+	}
+	if _, err := readSOCKS5Address(conn, header[3]); err != nil {
+		return err
+	}
+	port := make([]byte, 2)
+	if _, err := io.ReadFull(conn, port); err != nil {
+		return err
+	}
+	if header[1] != 0x00 {
+		return fmt.Errorf("socks5 connect failed, code: %d", header[1])
+	}
+	return nil
 }

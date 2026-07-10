@@ -8,33 +8,53 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
-// portRangeSpan 是端口范围轮换的跨度。每次 Reload 在 basePort+0 与 basePort+portRangeSpan
-// 两个不重叠的端口段之间交替，避免新进程与正在退出的旧进程抢占同一端口。
-// 取值须大于单次可能管理的最大节点数（此处 5000 足够）。
+// portRangeSpan 保留给既有配置兼容；当前 Reload 保持已加载节点端口稳定，避免入库地址漂移。
 const portRangeSpan = 5000
 
 // SingBoxProcess 管理 sing-box 子进程
 type SingBoxProcess struct {
 	cmd        *exec.Cmd
+	waitDone   chan struct{}
 	binPath    string
 	configDir  string
 	configFile string
 	basePort   int
-	portOffset int            // 端口范围偏移，每次 Reload 在 0/portRangeSize 间交替，避免新旧进程抢端口
+	portOffset int            // 端口范围偏移；已加载节点保持原端口，新节点从当前范围后续端口追加
 	portMap    map[string]int // nodeKey → 本地端口
 	nodes      []ParsedNode
 	mu         sync.Mutex
 	running    bool
+	status     string
+	reason     string
+	readyPorts int
 }
 
-// portRangeSize 是端口范围轮换的跨度。Reload 时新进程使用与刚停止的旧进程
-// 不重叠的端口段，避免旧进程 socket 尚未释放导致 "address already in use"。
+const (
+	SingBoxStatusNoTunnelNodes = "no_tunnel_nodes"
+	SingBoxStatusRunning       = "running"
+	SingBoxStatusStopped       = "stopped"
+	SingBoxStatusPartial       = "partial"
+	SingBoxStatusFailed        = "failed"
+)
+
+// SingBoxRuntimeStatus 是 WebUI/API 使用的可解释 sing-box 状态快照。
+type SingBoxRuntimeStatus struct {
+	Running    bool
+	Status     string
+	Reason     string
+	Nodes      int
+	ReadyPorts int
+	TotalPorts int
+}
+
+// portRangeSize 保留给历史配置说明，实际端口稳定性由 assembleConfig 维护。
 const portRangeSize = 5000
 
 // NewSingBoxProcess 创建 sing-box 进程管理器
@@ -53,6 +73,8 @@ func NewSingBoxProcess(binPath, dataDir string, basePort int) *SingBoxProcess {
 		configFile: filepath.Join(configDir, "config.json"),
 		basePort:   basePort,
 		portMap:    make(map[string]int),
+		status:     SingBoxStatusNoTunnelNodes,
+		reason:     SingBoxStatusNoTunnelNodes,
 	}
 }
 
@@ -74,35 +96,54 @@ func (s *SingBoxProcess) Reload(nodes []ParsedNode) error {
 		s.stopLocked()
 		s.nodes = nil
 		s.portMap = make(map[string]int)
+		s.setStatusLocked(SingBoxStatusNoTunnelNodes, SingBoxStatusNoTunnelNodes, 0)
 		return nil
 	}
 
-	// 端口范围轮换：在 0 / portRangeSpan 两个偏移间交替，使新进程与正在停止、
-	// socket 尚未完全释放的旧进程不抢占同一批端口，避免 "address already in use"。
-	if s.portOffset == 0 {
-		s.portOffset = portRangeSpan
-	} else {
-		s.portOffset = 0
-	}
+	// 保持当前端口范围，assembleConfig 会复用已加载节点端口并为新节点追加端口。
+	nextPortOffset := s.portOffset
 
 	// 生成配置
+	oldPortOffset := s.portOffset
+	oldPortMap := s.portMap
+	oldNodes := s.nodes
+	oldConfig, oldConfigErr := os.ReadFile(s.configFile)
+	restoreState := func() {
+		s.portOffset = oldPortOffset
+		s.portMap = oldPortMap
+		s.nodes = oldNodes
+		if oldConfigErr == nil {
+			if err := os.WriteFile(s.configFile, oldConfig, 0644); err != nil {
+				log.Printf("[custom] ⚠️ 恢复旧 sing-box 配置文件失败: %v", err)
+			}
+		}
+	}
+	s.portOffset = nextPortOffset
 	if err := s.generateConfig(tunnelNodes); err != nil {
+		restoreState()
+		s.setStatusLocked(SingBoxStatusFailed, "config_generation_failed", 0)
 		return fmt.Errorf("生成 sing-box 配置失败: %w", err)
+	}
+	if _, err := exec.LookPath(s.binPath); err != nil {
+		restoreState()
+		s.setStatusLocked(SingBoxStatusFailed, "binary_not_found", 0)
+		return fmt.Errorf("sing-box 未找到: %s（请安装 sing-box 或设置 SINGBOX_PATH）", s.binPath)
 	}
 
 	// 健壮性：整份配置若校验失败，二分剔除坏节点，用剩余可用节点重建，
 	// 避免单个非法节点拖垮全部订阅（一坏全灭）。
 	goodNodes := s.pruneInvalidNodes(tunnelNodes)
 	if len(goodNodes) == 0 {
-		s.stopLocked()
-		s.nodes = nil
-		s.portMap = make(map[string]int)
+		restoreState()
+		s.setStatusLocked(SingBoxStatusFailed, "all_tunnel_nodes_invalid", 0)
 		return fmt.Errorf("所有隧道节点均无法通过 sing-box 校验")
 	}
 	if len(goodNodes) != len(tunnelNodes) {
 		log.Printf("[custom] ⚠️ 剔除 %d 个非法节点，保留 %d 个可用节点",
 			len(tunnelNodes)-len(goodNodes), len(goodNodes))
 		if err := s.generateConfig(goodNodes); err != nil {
+			restoreState()
+			s.setStatusLocked(SingBoxStatusFailed, "config_rebuild_failed", 0)
 			return fmt.Errorf("重建 sing-box 配置失败: %w", err)
 		}
 	}
@@ -110,6 +151,8 @@ func (s *SingBoxProcess) Reload(nodes []ParsedNode) error {
 	// 重启进程
 	s.stopLocked()
 	if err := s.startLocked(); err != nil {
+		restoreState()
+		s.setStatusLocked(SingBoxStatusFailed, classifySingBoxStartError(err), 0)
 		return fmt.Errorf("启动 sing-box 失败: %w", err)
 	}
 
@@ -182,15 +225,30 @@ func (s *SingBoxProcess) buildConfigBytes(nodes []ParsedNode) ([]byte, error) {
 
 // assembleConfig 组装 sing-box 配置 map 及对应的 nodeKey→port 映射，无副作用（不写状态/文件）。
 func (s *SingBoxProcess) assembleConfig(nodes []ParsedNode) (map[string]interface{}, map[string]int) {
-	portMap := make(map[string]int)
-	port := s.basePort + s.portOffset
+	oldPortMap := make(map[string]int, len(s.portMap))
+	for key, port := range s.portMap {
+		oldPortMap[key] = port
+	}
+	portMap := make(map[string]int, len(nodes))
+	usedPorts := make(map[int]bool, len(oldPortMap))
+	maxPort := s.basePort + s.portOffset
+	for _, port := range oldPortMap {
+		usedPorts[port] = true
+		if port > maxPort {
+			maxPort = port
+		}
+	}
+	orderedNodes := append([]ParsedNode(nil), nodes...)
+	sort.SliceStable(orderedNodes, func(i, j int) bool {
+		return orderedNodes[i].NodeKey() < orderedNodes[j].NodeKey()
+	})
+	port := maxPort
 
 	var inbounds []map[string]interface{}
 	var outbounds []map[string]interface{}
 	var rules []map[string]interface{}
 
-	for i, node := range nodes {
-		port++
+	for i, node := range orderedNodes {
 		key := node.NodeKey()
 		tag := fmt.Sprintf("node-%d", i)
 
@@ -200,14 +258,25 @@ func (s *SingBoxProcess) assembleConfig(nodes []ParsedNode) (map[string]interfac
 			log.Printf("[custom] 跳过节点 %s (%s): %v", node.Name, node.Type, err)
 			continue
 		}
-		portMap[key] = port
+		listenPort, ok := oldPortMap[key]
+		if !ok {
+			for {
+				port++
+				if !usedPorts[port] {
+					break
+				}
+			}
+			listenPort = port
+			usedPorts[listenPort] = true
+		}
+		portMap[key] = listenPort
 
 		// 入站：本地 SOCKS5 监听
 		inbounds = append(inbounds, map[string]interface{}{
 			"type":        "socks",
 			"tag":         fmt.Sprintf("in-%s", tag),
 			"listen":      "127.0.0.1",
-			"listen_port": port,
+			"listen_port": listenPort,
 		})
 		outbounds = append(outbounds, outbound)
 
@@ -494,6 +563,7 @@ func convertPluginOpts(plugin string, opts map[string]interface{}) string {
 func (s *SingBoxProcess) startLocked() error {
 	binPath, err := exec.LookPath(s.binPath)
 	if err != nil {
+		s.setStatusLocked(SingBoxStatusFailed, "binary_not_found", 0)
 		return fmt.Errorf("sing-box 未找到: %s（请安装 sing-box 或设置 SINGBOX_PATH）", s.binPath)
 	}
 
@@ -501,6 +571,7 @@ func (s *SingBoxProcess) startLocked() error {
 	checkCmd := exec.Command(binPath, "check", "-c", s.configFile, "-D", s.configDir)
 	if checkOutput, err := checkCmd.CombinedOutput(); err != nil {
 		log.Printf("[custom] ❌ sing-box 配置检查失败:\n%s", string(checkOutput))
+		s.setStatusLocked(SingBoxStatusFailed, "config_invalid", 0)
 		return fmt.Errorf("sing-box 配置无效: %s", string(checkOutput))
 	}
 
@@ -511,6 +582,7 @@ func (s *SingBoxProcess) startLocked() error {
 	s.cmd.Stdout = os.Stdout
 
 	if err := s.cmd.Start(); err != nil {
+		s.setStatusLocked(SingBoxStatusFailed, "start_failed", 0)
 		return fmt.Errorf("sing-box 启动失败: %w", err)
 	}
 	s.running = true
@@ -531,67 +603,124 @@ func (s *SingBoxProcess) startLocked() error {
 
 	// 监控进程退出
 	exitCh := make(chan struct{})
+	cmd := s.cmd
+	s.waitDone = exitCh
 	go func() {
-		if s.cmd != nil && s.cmd.Process != nil {
-			s.cmd.Wait()
+		if cmd != nil && cmd.Process != nil {
+			cmd.Wait()
+			close(exitCh)
 			s.mu.Lock()
-			s.running = false
+			if s.cmd == cmd {
+				s.running = false
+				if s.status != SingBoxStatusFailed {
+					s.setStatusLocked(SingBoxStatusStopped, "process_exited", 0)
+				}
+				s.cmd = nil
+				s.waitDone = nil
+			}
 			s.mu.Unlock()
 		}
-		close(exitCh)
 	}()
 
 	// 等待端口就绪（最多 10 秒）
 	log.Printf("[custom] sing-box 启动中，等待端口就绪（配置: %s）...", s.configFile)
-	ready := false
+	totalPorts := len(s.portMap)
+	readyPorts := 0
 	for i := 0; i < 20; i++ {
 		// 检查进程是否已退出
 		select {
 		case <-exitCh:
+			s.setStatusLocked(SingBoxStatusFailed, "process_exited_on_start", 0)
 			return fmt.Errorf("sing-box 进程启动后立即退出，请检查日志")
 		default:
 		}
 
 		time.Sleep(500 * time.Millisecond)
-		// 检查第一个端口是否可连
-		for _, port := range s.portMap {
-			conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), time.Second)
-			if err == nil {
-				conn.Close()
-				ready = true
-				break
-			}
-		}
-		if ready {
+		readyPorts = s.countReadyPortsLocked(100 * time.Millisecond)
+		if totalPorts > 0 && readyPorts == totalPorts {
 			break
 		}
 	}
 
-	if !ready {
-		log.Println("[custom] ⚠️ sing-box 端口未就绪，部分节点可能不可用")
+	if totalPorts == 0 {
+		s.setStatusLocked(SingBoxStatusFailed, "no_ports_allocated", 0)
+		return fmt.Errorf("sing-box 未分配本地监听端口")
+	}
+	if readyPorts < totalPorts {
+		s.setStatusLocked(SingBoxStatusPartial, "ports_not_ready", readyPorts)
+		log.Printf("[custom] ⚠️ sing-box 端口未完全就绪，部分节点可能不可用（%d/%d）", readyPorts, totalPorts)
 	} else {
-		log.Printf("[custom] ✅ sing-box 启动成功，管理 %d 个节点", len(s.portMap))
+		s.setStatusLocked(SingBoxStatusRunning, SingBoxStatusRunning, readyPorts)
+		log.Printf("[custom] ✅ sing-box 启动成功，管理 %d 个节点", totalPorts)
 	}
 
 	return nil
+}
+
+func (s *SingBoxProcess) setStatusLocked(status, reason string, readyPorts int) {
+	s.status = status
+	s.reason = reason
+	s.readyPorts = readyPorts
+}
+
+func (s *SingBoxProcess) countReadyPortsLocked(timeout time.Duration) int {
+	ready := 0
+	for _, port := range s.portMap {
+		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), timeout)
+		if err == nil {
+			conn.Close()
+			ready++
+		}
+	}
+	return ready
+}
+
+func classifySingBoxStartError(err error) string {
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "未找到"):
+		return "binary_not_found"
+	case strings.Contains(msg, "配置无效"):
+		return "config_invalid"
+	case strings.Contains(msg, "立即退出"):
+		return "process_exited_on_start"
+	case strings.Contains(msg, "未分配"):
+		return "no_ports_allocated"
+	default:
+		return "start_failed"
+	}
 }
 
 // stopLocked 停止 sing-box（需持有锁）
 func (s *SingBoxProcess) stopLocked() {
 	if s.cmd != nil && s.cmd.Process != nil && s.running {
 		log.Println("[custom] 停止 sing-box 进程...")
-		s.cmd.Process.Signal(os.Interrupt)
-		done := make(chan struct{})
-		go func() {
-			s.cmd.Wait()
-			close(done)
-		}()
+		cmd := s.cmd
+		done := s.waitDone
+		cmd.Process.Signal(os.Interrupt)
+		if done == nil {
+			done = make(chan struct{})
+			go func() {
+				cmd.Wait()
+				close(done)
+			}()
+		}
 		select {
 		case <-done:
 		case <-time.After(5 * time.Second):
-			s.cmd.Process.Kill()
+			cmd.Process.Kill()
+			<-done
 		}
 		s.running = false
+		if s.cmd == cmd {
+			s.cmd = nil
+			s.waitDone = nil
+		}
+		if len(s.portMap) > 0 {
+			s.setStatusLocked(SingBoxStatusStopped, SingBoxStatusStopped, 0)
+		} else {
+			s.setStatusLocked(SingBoxStatusNoTunnelNodes, SingBoxStatusNoTunnelNodes, 0)
+		}
 	}
 }
 
@@ -607,6 +736,36 @@ func (s *SingBoxProcess) IsRunning() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.running
+}
+
+// GetRuntimeStatus 获取可解释的 sing-box 运行态。
+func (s *SingBoxProcess) GetRuntimeStatus() SingBoxRuntimeStatus {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	status := s.status
+	reason := s.reason
+	if status == "" {
+		switch {
+		case len(s.portMap) == 0:
+			status = SingBoxStatusNoTunnelNodes
+			reason = SingBoxStatusNoTunnelNodes
+		case s.running:
+			status = SingBoxStatusRunning
+			reason = SingBoxStatusRunning
+		default:
+			status = SingBoxStatusStopped
+			reason = SingBoxStatusStopped
+		}
+	}
+	return SingBoxRuntimeStatus{
+		Running:    s.running,
+		Status:     status,
+		Reason:     reason,
+		Nodes:      len(s.portMap),
+		ReadyPorts: s.readyPorts,
+		TotalPorts: len(s.portMap),
+	}
 }
 
 // GetLocalAddress 获取节点的本地 SOCKS5 地址
@@ -627,6 +786,15 @@ func (s *SingBoxProcess) GetPortMap() map[string]int {
 	for k, v := range s.portMap {
 		result[k] = v
 	}
+	return result
+}
+
+// GetNodes 返回当前已加载的 tunnel 节点快照。
+func (s *SingBoxProcess) GetNodes() []ParsedNode {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	result := make([]ParsedNode, len(s.nodes))
+	copy(result, s.nodes)
 	return result
 }
 

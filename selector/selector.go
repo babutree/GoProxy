@@ -23,11 +23,11 @@ const sessionSpreadTopK = 5
 var ErrNoNode = errors.New("no available node")
 
 type Store interface {
-	GetByRegion(region string, excludes []string) ([]storage.Proxy, error)
-	GetProxyByAddress(address string) (*storage.Proxy, error)
+	GetByRegion(region string, excludes []int64) ([]storage.Proxy, error)
+	GetProxyByID(id int64) (*storage.Proxy, error)
 }
 
-func Pick(store Store, region string, excludes []string) (*storage.Proxy, error) {
+func Pick(store Store, region string, excludes []int64) (*storage.Proxy, error) {
 	region = normalizeRegion(region)
 	proxies, err := store.GetByRegion(region, excludes)
 	if err != nil {
@@ -40,7 +40,7 @@ func Pick(store Store, region string, excludes []string) (*storage.Proxy, error)
 	return pickLowestLatency(available), nil
 }
 
-func Resolve(store Store, sessions *affinity.Store, route auth.ParsedUsername, excludes []string) (*storage.Proxy, error) {
+func Resolve(store Store, sessions *affinity.Store, route auth.ParsedUsername, excludes []int64) (*storage.Proxy, error) {
 	if route.Session == "" {
 		return Pick(store, route.Region, excludes)
 	}
@@ -52,14 +52,14 @@ func Resolve(store Store, sessions *affinity.Store, route auth.ParsedUsername, e
 	if err != nil {
 		return nil, err
 	}
-	sessions.Set(route.Session, proxy.Address, proxy.Region)
+	sessions.SetProxy(route.Session, proxy.ID, proxy.Address, proxy.Region)
 	return proxy, nil
 }
 
 // pickForSession 为一个 session 首次绑定选节点：在该地域延迟最低的前 K 个候选中，
 // 按 session 名哈希稳定地选择一个。同一 session 恒定映射同一节点（配合黏连），
 // 不同 session 分散到不同节点，同时把候选限制在最快的 K 个以保证出口质量。
-func pickForSession(store Store, region, session string, excludes []string) (*storage.Proxy, error) {
+func pickForSession(store Store, region, session string, excludes []int64) (*storage.Proxy, error) {
 	region = normalizeRegion(region)
 	proxies, err := store.GetByRegion(region, excludes)
 	if err != nil {
@@ -99,16 +99,16 @@ func hashString(s string) uint32 {
 	return h.Sum32()
 }
 
-func resolveBoundProxy(store Store, sessions *affinity.Store, route auth.ParsedUsername, excludes []string) (*storage.Proxy, string) {
+func resolveBoundProxy(store Store, sessions *affinity.Store, route auth.ParsedUsername, excludes []int64) (*storage.Proxy, string) {
 	binding, ok := sessions.Get(route.Session)
 	if !ok {
 		return nil, route.Region
 	}
 	rebindRegion := requestedOrBoundRegion(route.Region, binding.Region)
-	if excluded(binding.NodeAddress, excludes) || bindingRegionMismatch(binding, route.Region) {
+	if binding.ProxyID <= 0 || excluded(binding.ProxyID, excludes) || bindingRegionMismatch(binding, route.Region) {
 		return nil, rebindRegion
 	}
-	proxy, err := store.GetProxyByAddress(binding.NodeAddress)
+	proxy, err := store.GetProxyByID(binding.ProxyID)
 	if err != nil || !proxyAvailable(*proxy) || regionMismatch(proxy.Region, route.Region) {
 		sessions.Remove(route.Session)
 		return nil, rebindRegion
@@ -155,9 +155,9 @@ func latencyRank(latency int) int {
 	return latency
 }
 
-func excluded(address string, excludes []string) bool {
+func excluded(proxyID int64, excludes []int64) bool {
 	for _, exclude := range excludes {
-		if exclude == address {
+		if exclude == proxyID {
 			return true
 		}
 	}

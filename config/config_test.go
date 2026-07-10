@@ -43,12 +43,12 @@ func TestSaveLoadRoundTripUsesActiveGatewayFieldsOnly(t *testing.T) {
 	cfg.SOCKS5Port = ":9101"
 	cfg.WebUIPort = ":9102"
 	cfg.SessionTTLMinutes = 15
-	cfg.DefaultRegion = "jp"
+	cfg.DefaultRegion = " jp "
 	cfg.HealthIntervalMinutes = 7
 	cfg.MaxRetry = 4
 	cfg.SingBoxPath = "D:/tools/sing-box.exe"
-	cfg.AllowedCountries = []string{"JP", "US"}
-	cfg.BlockedCountries = []string{"CN"}
+	cfg.AllowedCountries = []string{" jp ", "US", "us", "bad"}
+	cfg.BlockedCountries = []string{" cn "}
 
 	if err := Save(cfg); err != nil {
 		t.Fatalf("Save() error = %v", err)
@@ -58,14 +58,66 @@ func TestSaveLoadRoundTripUsesActiveGatewayFieldsOnly(t *testing.T) {
 	if reloaded.HTTPPort != cfg.HTTPPort || reloaded.SOCKS5Port != cfg.SOCKS5Port || reloaded.WebUIPort != cfg.WebUIPort {
 		t.Fatalf("ports after reload = %q/%q/%q", reloaded.HTTPPort, reloaded.SOCKS5Port, reloaded.WebUIPort)
 	}
-	if reloaded.SessionTTLMinutes != cfg.SessionTTLMinutes || reloaded.DefaultRegion != cfg.DefaultRegion {
+	if reloaded.SessionTTLMinutes != cfg.SessionTTLMinutes || reloaded.DefaultRegion != "JP" {
 		t.Fatalf("session/default region after reload = %d/%q", reloaded.SessionTTLMinutes, reloaded.DefaultRegion)
+	}
+	if strings.Join(reloaded.AllowedCountries, ",") != "JP,US" || strings.Join(reloaded.BlockedCountries, ",") != "CN" {
+		t.Fatalf("countries after reload = allowed:%#v blocked:%#v", reloaded.AllowedCountries, reloaded.BlockedCountries)
 	}
 	if reloaded.HealthIntervalMinutes != cfg.HealthIntervalMinutes || reloaded.MaxRetry != cfg.MaxRetry || reloaded.SingBoxPath != cfg.SingBoxPath {
 		t.Fatalf("runtime settings after reload = %d/%d/%q", reloaded.HealthIntervalMinutes, reloaded.MaxRetry, reloaded.SingBoxPath)
 	}
 
 	assertConfigJSONOmitsLegacyFields(t, ConfigFile())
+}
+
+func TestSaveDoesNotPersistPlainProxyPassword(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("DATA_DIR", t.TempDir())
+	cfg := Load()
+	cfg.ProxyAuthPassword = "do-not-write"
+	cfg.ProxyAuthPasswordHash = passwordHash("do-not-write")
+
+	if err := Save(cfg); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	data, err := os.ReadFile(ConfigFile())
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if strings.Contains(string(data), "do-not-write") || strings.Contains(string(data), "proxy_auth_password\"") {
+		t.Fatalf("config persisted plain proxy password: %s", string(data))
+	}
+	if got := Get(); got.ProxyAuthPassword != "" || got.ProxyAuthPasswordHash == "" {
+		t.Fatalf("global credential state = password:%q hash:%q", got.ProxyAuthPassword, got.ProxyAuthPasswordHash)
+	}
+}
+
+func TestSaveFailureDoesNotPolluteGlobalConfig(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("DATA_DIR", t.TempDir())
+	oldCfg := Load()
+	oldCfg.ProxyAuthUsername = "old"
+	if err := Save(oldCfg); err != nil {
+		t.Fatalf("Save(old) error = %v", err)
+	}
+
+	badDataDir := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(badDataDir, []byte("file"), 0644); err != nil {
+		t.Fatalf("create bad DATA_DIR file: %v", err)
+	}
+	t.Setenv("DATA_DIR", badDataDir)
+	newCfg := *oldCfg
+	newCfg.ProxyAuthUsername = "new"
+	newCfg.SessionTTLMinutes = oldCfg.SessionTTLMinutes + 1
+
+	if err := Save(&newCfg); err == nil {
+		t.Fatal("Save() error = nil, want write failure")
+	}
+	if got := Get(); got.ProxyAuthUsername != "old" || got.SessionTTLMinutes != oldCfg.SessionTTLMinutes {
+		t.Fatalf("global config after failed Save = user:%q ttl:%d, want old/%d", got.ProxyAuthUsername, got.SessionTTLMinutes, oldCfg.SessionTTLMinutes)
+	}
 }
 
 func TestSaveLoadPersistsZeroMaxRetry(t *testing.T) {

@@ -1,6 +1,7 @@
 package custom
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -25,7 +26,46 @@ type ParsedNode struct {
 
 // NodeKey 节点去重 key
 func (n *ParsedNode) NodeKey() string {
-	return fmt.Sprintf("%s:%s:%d", n.Type, n.Server, n.Port)
+	canonical := map[string]interface{}{
+		"type":   n.Type,
+		"server": n.Server,
+		"port":   n.Port,
+	}
+	if len(n.Raw) > 0 {
+		canonical["raw"] = canonicalNodeRaw(n.Raw)
+	}
+	data, err := json.Marshal(canonical)
+	if err != nil {
+		data = []byte(fmt.Sprintf("%s|%s|%d", n.Type, n.Server, n.Port))
+	}
+	sum := sha256.Sum256(data)
+	return fmt.Sprintf("%s:%s:%d:%x", n.Type, n.Server, n.Port, sum[:8])
+}
+
+func canonicalNodeRaw(raw map[string]interface{}) map[string]interface{} {
+	canonical := make(map[string]interface{}, len(raw))
+	for k, v := range raw {
+		if k == "name" {
+			continue
+		}
+		canonical[k] = canonicalValue(v)
+	}
+	return canonical
+}
+
+func canonicalValue(v interface{}) interface{} {
+	switch value := v.(type) {
+	case map[string]interface{}:
+		return canonicalNodeRaw(value)
+	case []interface{}:
+		items := make([]interface{}, len(value))
+		for i, item := range value {
+			items[i] = canonicalValue(item)
+		}
+		return items
+	default:
+		return value
+	}
 }
 
 // IsDirect 是否可以直接作为代理使用（不需要 sing-box 转换）
@@ -150,8 +190,8 @@ func looksLikeProxyLinks(s string) bool {
 
 // clashConfig Clash YAML 配置结构（兼容新旧格式）
 type clashConfig struct {
-	Proxies    []map[string]interface{} `yaml:"proxies"`
-	ProxyOld   []map[string]interface{} `yaml:"Proxy"`    // 旧版 Clash 格式
+	Proxies  []map[string]interface{} `yaml:"proxies"`
+	ProxyOld []map[string]interface{} `yaml:"Proxy"` // 旧版 Clash 格式
 }
 
 // getProxies 兼容获取代理列表
@@ -344,7 +384,7 @@ func parseClashProxy(proxy map[string]interface{}) (*ParsedNode, error) {
 		"shadowsocks": true, "shadowsocksr": true,
 		"hysteria": true, "hysteria2": true, "tuic": true,
 		"anytls": true,
-		"http": true, "socks5": true,
+		"http":   true, "socks5": true,
 	}
 	if !supported[typ] {
 		return nil, fmt.Errorf("不支持的代理类型: %s", typ)
@@ -495,13 +535,13 @@ func parseVmessLink(link string) (*ParsedNode, error) {
 
 	// 构建 Clash 兼容的 raw 配置
 	raw := map[string]interface{}{
-		"type":   "vmess",
-		"name":   name,
-		"server": server,
-		"port":   port,
-		"uuid":   fmt.Sprintf("%v", info["id"]),
+		"type":    "vmess",
+		"name":    name,
+		"server":  server,
+		"port":    port,
+		"uuid":    fmt.Sprintf("%v", info["id"]),
 		"alterId": getInt(info, "aid"),
-		"cipher": getStrDefault(info, "scy", "auto"),
+		"cipher":  getStrDefault(info, "scy", "auto"),
 	}
 
 	// TLS

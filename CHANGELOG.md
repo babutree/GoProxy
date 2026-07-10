@@ -9,6 +9,7 @@
 
 ### 修复
 
+- 修复发布/部署配置漂移：GHCR 与 Docker Hub 发布命名空间改为 `babutree/goproxy`，Docker Compose 默认数据落点统一为宿主机 `./data`，地域黑名单默认值与 README/PRD 保持为空
 - 升级 sing-box 从 1.11.8 到 **1.13.5**，修复 anytls 等新协议不支持导致订阅节点启动失败的问题
 - sing-box 启动前新增 `sing-box check` 配置预检，配置无效时输出详细错误而非静默崩溃
 - 捕获 sing-box stderr 输出到 `[sing-box]` 日志，便于排查运行时错误
@@ -190,7 +191,7 @@
 
 ## 相关链接
 
-- [项目仓库](https://github.com/isboyjc/GoProxy)
-- [Docker Hub](https://hub.docker.com/r/isboyjc/goproxy)
-- [GitHub Container Registry](https://github.com/isboyjc/GoProxy/pkgs/container/goproxy)
-- [问题反馈](https://github.com/isboyjc/GoProxy/issues)
+- [项目仓库](https://github.com/babutree/GoProxy)
+- [Docker Hub](https://hub.docker.com/r/babutree/goproxy)
+- [GitHub Container Registry](https://github.com/babutree/GoProxy/pkgs/container/goproxy)
+- [问题反馈](https://github.com/babutree/GoProxy/issues)

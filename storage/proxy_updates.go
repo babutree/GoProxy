@@ -1,70 +1,159 @@
 package storage
 
-import "strings"
+import (
+	"database/sql"
+	"fmt"
+	"strings"
+)
 
 // Delete 立即删除指定代理
 func (s *Storage) Delete(address string) error {
-	_, err := s.db.Exec(`DELETE FROM proxies WHERE address = ?`, address)
-	return err
+	if err := s.requireUnambiguousAddress(address); err != nil {
+		return err
+	}
+	res, err := s.db.Exec(`DELETE FROM proxies WHERE address = ?`, address)
+	if err != nil {
+		return err
+	}
+	return requireRowsAffected(res.RowsAffected())
+}
+
+func (s *Storage) DeleteProxyByID(id int64) error {
+	res, err := s.db.Exec(`DELETE FROM proxies WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	return requireRowsAffected(res.RowsAffected())
 }
 
 // IncrFail 增加失败次数
 func (s *Storage) IncrFail(address string) error {
-	_, err := s.db.Exec(
+	if err := s.requireUnambiguousAddress(address); err != nil {
+		return err
+	}
+	res, err := s.db.Exec(
 		`UPDATE proxies SET fail_count = fail_count + 1, last_check = CURRENT_TIMESTAMP WHERE address = ?`,
 		address,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	return requireRowsAffected(res.RowsAffected())
 }
 
 // ResetFail 重置失败次数（验证通过）
 func (s *Storage) ResetFail(address string) error {
-	_, err := s.db.Exec(
+	if err := s.requireUnambiguousAddress(address); err != nil {
+		return err
+	}
+	res, err := s.db.Exec(
 		`UPDATE proxies SET fail_count = 0, last_check = CURRENT_TIMESTAMP WHERE address = ?`,
 		address,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	return requireRowsAffected(res.RowsAffected())
 }
 
 // UpdateLatency 更新代理的延迟信息（毫秒）
 func (s *Storage) UpdateLatency(address string, latencyMs int) error {
-	_, err := s.db.Exec(
+	if err := s.requireUnambiguousAddress(address); err != nil {
+		return err
+	}
+	res, err := s.db.Exec(
 		`UPDATE proxies SET latency = ? WHERE address = ?`,
 		latencyMs, address,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	return requireRowsAffected(res.RowsAffected())
+}
+
+func (s *Storage) UpdateLatencyByID(id int64, latencyMs int) error {
+	res, err := s.db.Exec(`UPDATE proxies SET latency = ? WHERE id = ?`, latencyMs, id)
+	if err != nil {
+		return err
+	}
+	return requireRowsAffected(res.RowsAffected())
 }
 
 // UpdateExitInfo 更新出口信息；自动地域可由验证结果回写，手动地域受保护。
 func (s *Storage) UpdateExitInfo(address, exitIP, exitLocation string, latencyMs int) error {
+	if err := s.requireUnambiguousAddress(address); err != nil {
+		return err
+	}
+	return s.updateExitInfoWhere(`address = ?`, []interface{}{address}, exitIP, exitLocation, latencyMs)
+}
+
+func (s *Storage) UpdateProxyExitInfo(id int64, exitIP, exitLocation string, latencyMs int) error {
+	return s.updateExitInfoWhere(`id = ?`, []interface{}{id}, exitIP, exitLocation, latencyMs)
+}
+
+func (s *Storage) UpdateSubscriptionProxyExitInfo(address string, subscriptionID int64, exitIP, exitLocation string, latencyMs int) error {
+	return s.updateExitInfoWhere(`address = ? AND source = ? AND subscription_id = ?`, []interface{}{address, SourceSubscription, subscriptionID}, exitIP, exitLocation, latencyMs)
+}
+
+func (s *Storage) updateExitInfoWhere(where string, args []interface{}, exitIP, exitLocation string, latencyMs int) error {
 	grade := CalculateQualityGrade(latencyMs)
 	region := regionFromExitLocation(exitLocation)
-	_, err := s.db.Exec(
+	queryArgs := []interface{}{exitIP, exitLocation, latencyMs, grade, region, region}
+	queryArgs = append(queryArgs, args...)
+	// 健康检查/验证成功时同样清零 fail_count（BUG-53）：只有到达此处才代表
+	// 探测通过，之前累积的失败应清除，节点方能重新参与选路/后续检查。
+	// 健康检查失败路径仍会累加 fail_count 至阈值并 disable，故持续坏的节点
+	// 不会来回横跳——只有真正探测成功才归零。
+	res, err := s.db.Exec(
 		`UPDATE proxies
-		 SET exit_ip = ?, exit_location = ?, latency = ?, quality_grade = ?,
+		 SET exit_ip = ?, exit_location = ?, latency = ?, quality_grade = ?, fail_count = 0,
 		     region = CASE WHEN region_source != 'manual' AND ? != '' THEN ? ELSE region END
-		 WHERE address = ?`,
-		exitIP, exitLocation, latencyMs, grade, region, region, address,
+		 WHERE `+where,
+		queryArgs...,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	return requireRowsAffected(res.RowsAffected())
 }
 
 // RecordProxyUse 记录代理使用（成功）
 func (s *Storage) RecordProxyUse(address string, success bool) error {
-	if success {
-		_, err := s.db.Exec(
-			`UPDATE proxies SET use_count = use_count + 1, success_count = success_count + 1, 
-			 last_used = CURRENT_TIMESTAMP WHERE address = ?`,
-			address,
-		)
+	if err := s.requireUnambiguousAddress(address); err != nil {
 		return err
 	}
-	_, err := s.db.Exec(
+	proxy, err := s.GetProxyByAddress(address)
+	if err != nil {
+		return err
+	}
+	return s.RecordProxyUseByID(proxy.ID, success)
+
+}
+
+func (s *Storage) RecordProxyUseByID(id int64, success bool) error {
+	if success {
+		// 成功即清零 fail_count：一次成功证明节点当前可用，
+		// 否则请求失败累积的 fail_count 永不归零，节点会被选路/健康检查
+		// 的 fail_count < 3 过滤永久排除（僵尸节点）。见 BUG-53。
+		res, err := s.db.Exec(
+			`UPDATE proxies SET use_count = use_count + 1, success_count = success_count + 1, 
+			 fail_count = 0, last_used = CURRENT_TIMESTAMP WHERE id = ?`,
+			id,
+		)
+		if err != nil {
+			return err
+		}
+		return requireRowsAffected(res.RowsAffected())
+	}
+	res, err := s.db.Exec(
 		`UPDATE proxies SET use_count = use_count + 1, fail_count = fail_count + 1, 
-		 last_used = CURRENT_TIMESTAMP WHERE address = ?`,
-		address,
+		 last_used = CURRENT_TIMESTAMP WHERE id = ?`,
+		id,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	return requireRowsAffected(res.RowsAffected())
 }
 
 // CalculateQualityGrade 根据延迟计算质量等级
@@ -123,16 +212,22 @@ func (s *Storage) DisableNotAllowedCountries(allowedCodes []string) (int64, erro
 
 // IncrementFailCount 增加失败次数
 func (s *Storage) IncrementFailCount(address string) error {
-	_, err := s.db.Exec(
+	if err := s.requireUnambiguousAddress(address); err != nil {
+		return err
+	}
+	res, err := s.db.Exec(
 		`UPDATE proxies SET fail_count = fail_count + 1 WHERE address = ?`,
 		address,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	return requireRowsAffected(res.RowsAffected())
 }
 
 // DeleteBySubscriptionID 删除指定订阅的所有代理
 func (s *Storage) DeleteBySubscriptionID(subscriptionID int64) (int64, error) {
-	res, err := s.db.Exec(`DELETE FROM proxies WHERE subscription_id = ?`, subscriptionID)
+	res, err := s.db.Exec(`DELETE FROM proxies WHERE subscription_id = ? AND source = ?`, subscriptionID, SourceSubscription)
 	if err != nil {
 		return 0, err
 	}
@@ -141,63 +236,124 @@ func (s *Storage) DeleteBySubscriptionID(subscriptionID int64) (int64, error) {
 
 // DisableProxy 禁用代理（软删除，用于订阅代理）
 func (s *Storage) DisableProxy(address string) error {
-	_, err := s.db.Exec(
-		`UPDATE proxies SET status = 'disabled' WHERE address = ?`,
-		address,
+	if err := s.requireUnambiguousAddress(address); err != nil {
+		return err
+	}
+	return s.disableProxyWhere(`address = ?`, address)
+}
+
+func (s *Storage) DisableProxyByID(id int64) error {
+	return s.disableProxyWhere(`id = ?`, id)
+}
+
+func (s *Storage) DisableSubscriptionProxy(address string, subscriptionID int64) error {
+	return s.disableProxyWhere(`address = ? AND source = ? AND subscription_id = ?`, address, SourceSubscription, subscriptionID)
+}
+
+func (s *Storage) disableProxyWhere(where string, args ...interface{}) error {
+	res, err := s.db.Exec(
+		`UPDATE proxies SET status = 'disabled' WHERE `+where,
+		args...,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	return requireRowsAffected(res.RowsAffected())
 }
 
 // EnableProxy 启用代理（从禁用状态恢复）
 func (s *Storage) EnableProxy(address string) error {
-	_, err := s.db.Exec(
-		`UPDATE proxies SET status = 'active', fail_count = 0 WHERE address = ?`,
-		address,
+	if err := s.requireUnambiguousAddress(address); err != nil {
+		return err
+	}
+	return s.enableProxyWhere(`address = ?`, address)
+}
+
+func (s *Storage) EnableProxyByID(id int64) error {
+	return s.enableProxyWhere(`id = ?`, id)
+}
+
+func (s *Storage) EnableSubscriptionProxy(address string, subscriptionID int64) error {
+	return s.enableProxyWhere(`address = ? AND source = ? AND subscription_id = ?`, address, SourceSubscription, subscriptionID)
+}
+
+func (s *Storage) enableProxyWhere(where string, args ...interface{}) error {
+	res, err := s.db.Exec(
+		`UPDATE proxies SET status = 'active', fail_count = 0
+		 WHERE `+where+` AND status = 'disabled'
+		   AND NOT EXISTS (SELECT 1 FROM subscriptions WHERE subscriptions.id = proxies.subscription_id AND subscriptions.status = 'paused')`,
+		args...,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	return requireRowsAffected(res.RowsAffected())
 }
 
 // PauseProxy 用户手动停用节点，状态置为 'paused' 以区别于验证失败的 'disabled'。
 // paused 表示“用户主动不用”，disabled 表示“系统判定不可用”。两者都不参与选路。
 func (s *Storage) PauseProxy(address string) error {
-	_, err := s.db.Exec(
-		`UPDATE proxies SET status = 'paused' WHERE address = ?`,
+	if err := s.requireUnambiguousAddress(address); err != nil {
+		return err
+	}
+	res, err := s.db.Exec(
+		`UPDATE proxies SET user_paused = 1 WHERE address = ?`,
 		address,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	return requireRowsAffected(res.RowsAffected())
 }
 
-// UnpauseProxy 恢复用户手动停用的节点，重置失败计数后置为 active。
+func (s *Storage) PauseProxyByID(id int64) error {
+	res, err := s.db.Exec(`UPDATE proxies SET user_paused = 1 WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	return requireRowsAffected(res.RowsAffected())
+}
+
+// UnpauseProxy 恢复用户手动停用的节点；父订阅暂停时不恢复为可选路节点。
 func (s *Storage) UnpauseProxy(address string) error {
-	_, err := s.db.Exec(
-		`UPDATE proxies SET status = 'active', fail_count = 0 WHERE address = ?`,
+	if err := s.requireUnambiguousAddress(address); err != nil {
+		return err
+	}
+	res, err := s.db.Exec(
+		`UPDATE proxies SET user_paused = 0, fail_count = 0 WHERE address = ?`,
 		address,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	return requireRowsAffected(res.RowsAffected())
+}
+
+func (s *Storage) UnpauseProxyByID(id int64) error {
+	res, err := s.db.Exec(`UPDATE proxies SET user_paused = 0, fail_count = 0 WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	return requireRowsAffected(res.RowsAffected())
+}
+
+func (s *Storage) requireUnambiguousAddress(address string) error {
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM proxies WHERE address = ?`, address).Scan(&count); err != nil {
+		return err
+	}
+	if count == 0 {
+		return sql.ErrNoRows
+	}
+	if count > 1 {
+		return fmt.Errorf("proxy address %q is ambiguous", address)
+	}
+	return nil
 }
 
 // DeleteBySource 删除指定来源的所有代理
 func (s *Storage) DeleteBySource(source string) (int64, error) {
 	res, err := s.db.Exec(`DELETE FROM proxies WHERE source = ?`, source)
-	if err != nil {
-		return 0, err
-	}
-	return res.RowsAffected()
-}
-
-// DeleteCustomProxiesNotIn 删除不在给定地址列表中的订阅代理
-func (s *Storage) DeleteCustomProxiesNotIn(addresses []string) (int64, error) {
-	if len(addresses) == 0 {
-		return s.DeleteBySource(SourceSubscription)
-	}
-	placeholders := make([]string, len(addresses))
-	args := make([]interface{}, len(addresses))
-	for i, addr := range addresses {
-		placeholders[i] = "?"
-		args[i] = addr
-	}
-	query := `DELETE FROM proxies WHERE source = 'subscription' AND address NOT IN (` + strings.Join(placeholders, ",") + `)`
-	res, err := s.db.Exec(query, args...)
 	if err != nil {
 		return 0, err
 	}

@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,6 +20,7 @@ type Validator struct {
 	concurrency   int
 	timeout       time.Duration
 	validateURL   string
+	validateURLs  []string
 	maxResponseMs int
 	cfg           *config.Config
 }
@@ -40,9 +42,22 @@ func New(concurrency, timeoutSec int, validateURL string) *Validator {
 		concurrency:   concurrency,
 		timeout:       time.Duration(timeoutSec) * time.Second,
 		validateURL:   validateURL,
+		validateURLs:  parseValidateURLs(validateURL),
 		maxResponseMs: maxMs,
 		cfg:           cfg,
 	}
+}
+
+func parseValidateURLs(value string) []string {
+	parts := strings.Split(value, ",")
+	targets := make([]string, 0, len(parts))
+	for _, part := range parts {
+		target := strings.TrimSpace(part)
+		if target != "" {
+			targets = append(targets, target)
+		}
+	}
+	return targets
 }
 
 type Result struct {
@@ -64,7 +79,7 @@ func getExitIPInfo(client *http.Client) (string, string) {
 
 	var result struct {
 		Status      string `json:"status"`
-		Query       string `json:"query"`       // IP 地址
+		Query       string `json:"query"` // IP 地址
 		Country     string `json:"country"`
 		CountryCode string `json:"countryCode"`
 		City        string `json:"city"`
@@ -79,7 +94,7 @@ func getExitIPInfo(client *http.Client) (string, string) {
 	if result.City != "" {
 		location = fmt.Sprintf("%s %s", result.CountryCode, result.City)
 	}
-	
+
 	return result.Query, location
 }
 
@@ -89,7 +104,7 @@ var httpsTestTargets = []string{
 	"https://www.openai.com",
 	"https://www.github.com",
 	"https://www.cloudflare.com",
-	"https://httpbin.org/ip",
+	"https://www.gstatic.com/generate_204",
 }
 
 // checkHTTPSConnect 通过 HTTP 代理实际访问一个随机 HTTPS 网站，验证 CONNECT 隧道是否可用
@@ -181,17 +196,8 @@ func (v *Validator) ValidateOne(p storage.Proxy) (bool, time.Duration, string, s
 		return false, 0, "", ""
 	}
 
-	start := time.Now()
-	resp, err := client.Get(v.validateURL)
-	latency := time.Since(start)
-	if err != nil {
-		return false, 0, "", ""
-	}
-	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body)
-
-	// 验证状态码（200 或 204 都接受）
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+	latency, ok := v.validateConnectivity(client)
+	if !ok {
 		return false, latency, "", ""
 	}
 
@@ -202,35 +208,15 @@ func (v *Validator) ValidateOne(p storage.Proxy) (bool, time.Duration, string, s
 
 	// 获取出口 IP 和地理位置（仅在验证通过时）
 	exitIP, exitLocation := getExitIPInfo(client)
-	
+
 	// 必须能获取到出口信息
 	if exitIP == "" || exitLocation == "" {
 		return false, latency, exitIP, exitLocation
 	}
-	
+
 	// 地理过滤：白名单优先，否则走黑名单
-	if v.cfg != nil && len(exitLocation) >= 2 {
-		countryCode := exitLocation[:2]
-		if len(v.cfg.AllowedCountries) > 0 {
-			// 白名单模式：不在白名单中则拒绝
-			allowed := false
-			for _, a := range v.cfg.AllowedCountries {
-				if countryCode == a {
-					allowed = true
-					break
-				}
-			}
-			if !allowed {
-				return false, latency, exitIP, exitLocation
-			}
-		} else if len(v.cfg.BlockedCountries) > 0 {
-			// 黑名单模式
-			for _, blocked := range v.cfg.BlockedCountries {
-				if countryCode == blocked {
-					return false, latency, exitIP, exitLocation
-				}
-			}
-		}
+	if len(exitLocation) >= 2 && !v.passesGeoFilter(exitLocation[:2]) {
+		return false, latency, exitIP, exitLocation
 	}
 
 	// HTTP 代理额外检测：必须支持 HTTPS CONNECT 隧道
@@ -241,6 +227,50 @@ func (v *Validator) ValidateOne(p storage.Proxy) (bool, time.Duration, string, s
 	}
 
 	return true, latency, exitIP, exitLocation
+}
+
+// passesGeoFilter 依据白/黑名单判断某国家代码是否通过地理过滤。
+// 读取 v.cfg 的国家名单 slice；v.cfg 是 config.Get() 返回的不可变快照指针，
+// config.Save 通过替换 globalCfg 指针（而非原地改写）保证这里的读取不会撕裂。
+func (v *Validator) passesGeoFilter(countryCode string) bool {
+	if v.cfg == nil {
+		return true
+	}
+	if len(v.cfg.AllowedCountries) > 0 {
+		// 白名单模式：不在白名单中则拒绝
+		for _, a := range v.cfg.AllowedCountries {
+			if countryCode == a {
+				return true
+			}
+		}
+		return false
+	}
+	// 黑名单模式
+	for _, blocked := range v.cfg.BlockedCountries {
+		if countryCode == blocked {
+			return false
+		}
+	}
+	return true
+}
+
+func (v *Validator) validateConnectivity(client *http.Client) (time.Duration, bool) {
+	for _, target := range v.validateURLs {
+		start := time.Now()
+		resp, err := client.Get(target)
+		latency := time.Since(start)
+		if err != nil {
+			continue
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+
+		// 验证状态码（200 或 204 都接受）
+		if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNoContent {
+			return latency, true
+		}
+	}
+	return 0, false
 }
 
 func newHTTPClient(address string, timeout time.Duration) (*http.Client, error) {

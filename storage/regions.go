@@ -15,10 +15,11 @@ type RegionCount struct {
 	Count  int    `json:"count"`
 }
 
-func (s *Storage) GetByRegion(region string, excludes []string) ([]Proxy, error) {
+func (s *Storage) GetByRegion(region string, excludes []int64) ([]Proxy, error) {
 	query := `SELECT ` + proxyColumns + `
 		 FROM proxies
-		 WHERE status IN ('active', 'degraded') AND fail_count < 3`
+		 WHERE status IN ('active', 'degraded') AND user_paused = 0 AND fail_count < 3
+		   AND NOT EXISTS (SELECT 1 FROM subscriptions WHERE subscriptions.id = proxies.subscription_id AND subscriptions.status = 'paused')`
 	args := []interface{}{}
 	if normalized := normalizeRegion(region); normalized != "" {
 		query += ` AND region = ?`
@@ -29,7 +30,7 @@ func (s *Storage) GetByRegion(region string, excludes []string) ([]Proxy, error)
 	return s.queryProxies(query, args, excludeMap)
 }
 
-func (s *Storage) GetRandomByRegion(region string, excludes []string) (*Proxy, error) {
+func (s *Storage) GetRandomByRegion(region string, excludes []int64) (*Proxy, error) {
 	proxies, err := s.GetByRegion(region, excludes)
 	if err != nil {
 		return nil, err
@@ -45,7 +46,8 @@ func (s *Storage) CountByRegion() (map[string]int, error) {
 	rows, err := s.db.Query(`
 		SELECT region, COUNT(*)
 		FROM proxies
-		WHERE status IN ('active', 'degraded') AND fail_count < 3 AND region != ''
+		WHERE status IN ('active', 'degraded') AND user_paused = 0 AND fail_count < 3 AND region != ''
+		  AND NOT EXISTS (SELECT 1 FROM subscriptions WHERE subscriptions.id = proxies.subscription_id AND subscriptions.status = 'paused')
 		GROUP BY region`)
 	if err != nil {
 		return nil, err
@@ -68,7 +70,8 @@ func (s *Storage) GetRegionsWithCount() ([]RegionCount, error) {
 	rows, err := s.db.Query(`
 		SELECT region, COUNT(*)
 		FROM proxies
-		WHERE status IN ('active', 'degraded') AND fail_count < 3 AND region != ''
+		WHERE status IN ('active', 'degraded') AND user_paused = 0 AND fail_count < 3 AND region != ''
+		  AND NOT EXISTS (SELECT 1 FROM subscriptions WHERE subscriptions.id = proxies.subscription_id AND subscriptions.status = 'paused')
 		GROUP BY region
 		ORDER BY region ASC`)
 	if err != nil {
@@ -87,7 +90,7 @@ func (s *Storage) GetRegionsWithCount() ([]RegionCount, error) {
 	return regions, rows.Err()
 }
 
-func (s *Storage) queryProxies(query string, args []interface{}, excludes map[string]bool) ([]Proxy, error) {
+func (s *Storage) queryProxies(query string, args []interface{}, excludes map[int64]bool) ([]Proxy, error) {
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err
@@ -100,29 +103,59 @@ func (s *Storage) queryProxies(query string, args []interface{}, excludes map[st
 		if err != nil {
 			return nil, err
 		}
-		if !excludes[p.Address] {
+		if !excludes[p.ID] {
 			proxies = append(proxies, *p)
 		}
 	}
 	return proxies, rows.Err()
 }
 
-func makeExcludeMap(excludes []string) map[string]bool {
-	excludeMap := make(map[string]bool, len(excludes))
-	for _, address := range excludes {
-		excludeMap[address] = true
+func makeExcludeMap(excludes []int64) map[int64]bool {
+	excludeMap := make(map[int64]bool, len(excludes))
+	for _, id := range excludes {
+		excludeMap[id] = true
 	}
 	return excludeMap
 }
 
 func (s *Storage) GetProxyByAddress(address string) (*Proxy, error) {
-	row := s.db.QueryRow(`SELECT `+proxyColumns+` FROM proxies WHERE address = ?`, address)
+	row := s.db.QueryRow(`SELECT `+proxyColumns+` FROM proxies WHERE address = ? ORDER BY source = ? DESC, subscription_id ASC LIMIT 1`, address, SourceManual)
 	proxy, err := scanProxy(row)
 	if err == nil {
 		return proxy, nil
 	}
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("proxy %s not found", address)
+	}
+	return nil, err
+}
+
+func (s *Storage) GetProxyByIdentity(address, source string, subscriptionID int64) (*Proxy, error) {
+	if source == SourceManual {
+		subscriptionID = 0
+	}
+	row := s.db.QueryRow(
+		`SELECT `+proxyColumns+` FROM proxies WHERE address = ? AND source = ? AND subscription_id = ?`,
+		address, source, subscriptionID,
+	)
+	proxy, err := scanProxy(row)
+	if err == nil {
+		return proxy, nil
+	}
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("proxy %s/%s/%d not found", address, source, subscriptionID)
+	}
+	return nil, err
+}
+
+func (s *Storage) GetProxyByID(id int64) (*Proxy, error) {
+	row := s.db.QueryRow(`SELECT `+proxyColumns+` FROM proxies WHERE id = ?`, id)
+	proxy, err := scanProxy(row)
+	if err == nil {
+		return proxy, nil
+	}
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("proxy id %d not found", id)
 	}
 	return nil, err
 }
