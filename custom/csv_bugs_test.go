@@ -87,18 +87,41 @@ func TestSingBoxPortMapStableAcrossMultiSubscriptionReloads(t *testing.T) {
 	nodeA := tunnelNode("sub-a", "a.example.com", "password-a")
 	nodeB := tunnelNode("sub-b", "b.example.com", "password-b")
 
-	_, firstPorts := s.assembleConfig([]ParsedNode{nodeA})
+	_, firstPorts, firstHTTPPorts := s.assembleConfig([]ParsedNode{nodeA})
 	s.portMap = firstPorts
-	_, secondPorts := s.assembleConfig([]ParsedNode{nodeB, nodeA})
+	s.httpPortMap = firstHTTPPorts
+	_, secondPorts, secondHTTPPorts := s.assembleConfig([]ParsedNode{nodeB, nodeA})
 
 	if firstPorts[nodeA.NodeKey()] != secondPorts[nodeA.NodeKey()] {
-		t.Fatalf("existing node port changed from %d to %d", firstPorts[nodeA.NodeKey()], secondPorts[nodeA.NodeKey()])
+		t.Fatalf("existing node SOCKS5 port changed from %d to %d", firstPorts[nodeA.NodeKey()], secondPorts[nodeA.NodeKey()])
 	}
 	if secondPorts[nodeB.NodeKey()] == 0 {
-		t.Fatal("new node did not receive a port")
+		t.Fatal("new node did not receive a SOCKS5 port")
 	}
 	if secondPorts[nodeA.NodeKey()] == secondPorts[nodeB.NodeKey()] {
-		t.Fatal("different tunnel nodes received the same local port")
+		t.Fatal("different tunnel nodes received the same SOCKS5 port")
+	}
+
+	// 方案 B：HTTP 端口同样应稳定、非零、且不与任何其他端口冲突。
+	if firstHTTPPorts[nodeA.NodeKey()] != secondHTTPPorts[nodeA.NodeKey()] {
+		t.Fatalf("existing node HTTP port changed from %d to %d", firstHTTPPorts[nodeA.NodeKey()], secondHTTPPorts[nodeA.NodeKey()])
+	}
+	if secondHTTPPorts[nodeA.NodeKey()] == 0 || secondHTTPPorts[nodeB.NodeKey()] == 0 {
+		t.Fatal("tunnel node did not receive an HTTP port")
+	}
+	// 所有 SOCKS5 与 HTTP 端口必须两两不同（同一 usedPorts 池分配）。
+	seen := map[int]string{}
+	for key, p := range secondPorts {
+		if prev, dup := seen[p]; dup {
+			t.Fatalf("port %d reused by SOCKS5 %s and %s", p, key, prev)
+		}
+		seen[p] = "socks:" + key
+	}
+	for key, p := range secondHTTPPorts {
+		if prev, dup := seen[p]; dup {
+			t.Fatalf("port %d reused by HTTP %s and %s", p, key, prev)
+		}
+		seen[p] = "http:" + key
 	}
 }
 

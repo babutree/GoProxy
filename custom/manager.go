@@ -243,7 +243,12 @@ func (m *Manager) RefreshSubscription(subID int64) error {
 
 	// 收集所有入池的代理（带正确的协议信息）
 	var allProxies []storage.Proxy
-	var tunnelAddrs []string
+	// 方案 B：每个 tunnel 节点暴露 SOCKS5 + HTTP 两个本地入站，各自作为独立代理入库。
+	type tunnelProxy struct {
+		addr  string
+		proto string
+	}
+	var tunnelProxies []tunnelProxy
 
 	// 先重载 tunnel；失败时不删除该订阅旧代理，避免一次坏配置破坏旧可用配置。
 	if len(tunnelNodes) > 0 {
@@ -269,11 +274,16 @@ func (m *Manager) RefreshSubscription(subID int64) error {
 			return fmt.Errorf("sing-box 重载失败: %w", err)
 		} else {
 			portMap := m.singbox.GetPortMap()
+			httpPortMap := m.singbox.GetHTTPPortMap()
 			for _, node := range tunnelNodes {
 				key := node.NodeKey()
 				if port, ok := portMap[key]; ok {
 					addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
-					tunnelAddrs = append(tunnelAddrs, addr)
+					tunnelProxies = append(tunnelProxies, tunnelProxy{addr: addr, proto: "socks5"})
+				}
+				if port, ok := httpPortMap[key]; ok {
+					addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+					tunnelProxies = append(tunnelProxies, tunnelProxy{addr: addr, proto: "http"})
 				}
 			}
 		}
@@ -298,14 +308,14 @@ func (m *Manager) RefreshSubscription(subID int64) error {
 		log.Printf("[custom] 📥 %d 个 HTTP/SOCKS5 节点直接入池", len(directNodes))
 	}
 
-	for _, addr := range tunnelAddrs {
-		proxy, ok := m.addPendingSubscriptionProxy(addr, "socks5", subID)
+	for _, tp := range tunnelProxies {
+		proxy, ok := m.addPendingSubscriptionProxy(tp.addr, tp.proto, subID)
 		if ok {
 			allProxies = append(allProxies, *proxy)
 		}
 	}
-	if len(tunnelAddrs) > 0 {
-		log.Printf("[custom] 📥 %d 个加密节点通过 sing-box 转换入池", len(tunnelAddrs))
+	if len(tunnelProxies) > 0 {
+		log.Printf("[custom] 📥 %d 个加密节点入站（SOCKS5+HTTP）通过 sing-box 转换入池", len(tunnelProxies))
 	}
 
 	// 验证新入池的代理
@@ -592,14 +602,21 @@ func (m *Manager) addManualTunnelNode(node *ParsedNode, region, note string) err
 	}
 
 	key := node.NodeKey()
-	port, ok := m.singbox.GetPortMap()[key]
+	socksPort, ok := m.singbox.GetPortMap()[key]
 	if !ok {
 		return fmt.Errorf("sing-box 未为节点 %s 分配本地端口", key)
 	}
 
-	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
-	if err := m.storage.AddManualProxy(addr, "socks5", region, note); err != nil {
-		return fmt.Errorf("存储人工节点失败: %w", err)
+	// 方案 B：手动加密节点同样暴露 SOCKS5 + HTTP 两个本地入站，各自入库。
+	socksAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(socksPort))
+	if err := m.storage.AddManualProxy(socksAddr, "socks5", region, note); err != nil {
+		return fmt.Errorf("存储人工节点(SOCKS5)失败: %w", err)
+	}
+	if httpPort, ok := m.singbox.GetHTTPPortMap()[key]; ok {
+		httpAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(httpPort))
+		if err := m.storage.AddManualProxy(httpAddr, "http", region, note); err != nil {
+			return fmt.Errorf("存储人工节点(HTTP)失败: %w", err)
+		}
 	}
 	return nil
 }
