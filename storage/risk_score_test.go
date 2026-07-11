@@ -209,13 +209,13 @@ func TestProxyColumnsMatchScanProxy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rows.Columns(): %v", err)
 	}
-	// 当前模型：id..note(20) + ipapiis_score + ipapi_flags + ipapi_flags_seen + starred + cf_blocked = 25 列。硬编码断言，防止任一侧漏改。
-	if len(cols) != 25 {
-		t.Fatalf("proxyColumns yields %d columns, want 25 (id..note + risk columns + starred + cf_blocked)", len(cols))
+	// 当前模型：id..note(20) + ipapiis_score + ipapi_flags + ipapi_flags_seen + starred + cf_blocked + dual_protocol = 26 列。硬编码断言，防止任一侧漏改。
+	if len(cols) != 26 {
+		t.Fatalf("proxyColumns yields %d columns, want 26 (id..note + risk columns + starred + cf_blocked + dual_protocol)", len(cols))
 	}
-	// 最后两列必须与 scanProxy 末尾新增字段对齐。
-	if cols[len(cols)-2] != "starred" || cols[len(cols)-1] != "cf_blocked" {
-		t.Fatalf("last two SELECT columns = %q,%q, want starred,cf_blocked", cols[len(cols)-2], cols[len(cols)-1])
+	// 最后三列必须与 scanProxy 末尾新增字段对齐。
+	if cols[len(cols)-3] != "starred" || cols[len(cols)-2] != "cf_blocked" || cols[len(cols)-1] != "dual_protocol" {
+		t.Fatalf("last three SELECT columns = %q,%q,%q, want starred,cf_blocked,dual_protocol", cols[len(cols)-3], cols[len(cols)-2], cols[len(cols)-1])
 	}
 
 	if !rows.Next() {

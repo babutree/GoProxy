@@ -295,7 +295,7 @@ func (m *Manager) RefreshSubscription(subID int64) error {
 	for _, node := range directNodes {
 		addr := node.DirectAddress()
 		proto := node.DirectProtocol()
-		proxy, ok := m.addPendingSubscriptionProxy(addr, proto, subID)
+		proxy, ok := m.addPendingSubscriptionProxy(addr, proto, subID, false)
 		if ok {
 			allProxies = append(allProxies, *proxy)
 		}
@@ -305,7 +305,7 @@ func (m *Manager) RefreshSubscription(subID int64) error {
 	}
 
 	for _, tp := range tunnelProxies {
-		proxy, ok := m.addPendingSubscriptionProxy(tp.addr, tp.proto, subID)
+		proxy, ok := m.addPendingSubscriptionProxy(tp.addr, tp.proto, subID, true)
 		if ok {
 			allProxies = append(allProxies, *proxy)
 		}
@@ -383,7 +383,10 @@ func mapValues(nodeMap map[string]ParsedNode) []ParsedNode {
 	return nodes
 }
 
-func (m *Manager) addPendingSubscriptionProxy(addr, proto string, subID int64) (*storage.Proxy, bool) {
+// addPendingSubscriptionProxy 新增一条订阅代理并标记为待验证。
+// dualProtocol=true 表示该地址是单 mixed 端口（同时服务 SOCKS5+HTTP）的隧道节点，
+// 显式落库供前端可靠渲染双协议标签，而非靠地址长相猜测。
+func (m *Manager) addPendingSubscriptionProxy(addr, proto string, subID int64, dualProtocol bool) (*storage.Proxy, bool) {
 	if err := m.storage.AddProxyWithSource(addr, proto, storage.SourceSubscription, subID); err != nil {
 		log.Printf("[custom] ⚠️ 新增订阅代理 %s 失败: %v", addr, err)
 		return nil, false
@@ -396,6 +399,13 @@ func (m *Manager) addPendingSubscriptionProxy(addr, proto string, subID int64) (
 	if err != nil {
 		log.Printf("[custom] ⚠️ 读取订阅代理 %s 身份失败: %v", addr, err)
 		return nil, false
+	}
+	if dualProtocol {
+		if err := m.storage.SetProxyDualProtocol(proxy.ID, true); err != nil {
+			log.Printf("[custom] ⚠️ 标记订阅代理 %s 双协议失败: %v", addr, err)
+		} else {
+			proxy.DualProtocol = true
+		}
 	}
 	return proxy, true
 }
@@ -608,6 +618,13 @@ func (m *Manager) addManualTunnelNode(node *ParsedNode, region, note string) err
 	mixedAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(socksPort))
 	if err := m.storage.AddManualProxy(mixedAddr, "socks5", region, note); err != nil {
 		return fmt.Errorf("存储人工节点入站失败: %w", err)
+	}
+	// 手动加密节点是 mixed 端口（单端口同时服务 SOCKS5+HTTP），显式置位 dual_protocol，
+	// 供前端可靠渲染双协议标签，而非靠地址长相猜测。
+	if p, err := m.storage.GetProxyByAddress(mixedAddr); err == nil {
+		if err := m.storage.SetProxyDualProtocol(p.ID, true); err != nil {
+			log.Printf("[custom] ⚠️ 置位手动节点 dual_protocol 失败: %v", err)
+		}
 	}
 	return nil
 }

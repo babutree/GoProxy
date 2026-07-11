@@ -53,6 +53,7 @@ func (s *Storage) migrateRequiredProxyColumns() error {
 		{name: "ipapi_flags_seen", sql: `ALTER TABLE proxies ADD COLUMN ipapi_flags_seen INTEGER NOT NULL DEFAULT 0`},
 		{name: "starred", sql: `ALTER TABLE proxies ADD COLUMN starred INTEGER NOT NULL DEFAULT 0`},
 		{name: "cf_blocked", sql: `ALTER TABLE proxies ADD COLUMN cf_blocked INTEGER NOT NULL DEFAULT -1`},
+		{name: "dual_protocol", sql: `ALTER TABLE proxies ADD COLUMN dual_protocol INTEGER NOT NULL DEFAULT 0`},
 	}
 
 	for _, column := range columns {
@@ -162,7 +163,8 @@ func (s *Storage) rebuildProxiesWithoutAddressUnique() error {
 			ipapi_flags     TEXT NOT NULL DEFAULT '',
 			ipapi_flags_seen INTEGER NOT NULL DEFAULT 0,
 			starred         INTEGER NOT NULL DEFAULT 0,
-			cf_blocked      INTEGER NOT NULL DEFAULT -1
+			cf_blocked      INTEGER NOT NULL DEFAULT -1,
+			dual_protocol   INTEGER NOT NULL DEFAULT 0
 		)`); err != nil {
 		return fmt.Errorf("create proxies_new: %w", err)
 	}
@@ -170,11 +172,11 @@ func (s *Storage) rebuildProxiesWithoutAddressUnique() error {
 		INSERT INTO proxies_new (
 			id, address, protocol, region, region_source, note, exit_ip, exit_location,
 			latency, quality_grade, use_count, success_count, fail_count, last_used,
-			last_check, created_at, status, user_paused, source, subscription_id, ipapiis_score, ipapi_flags, ipapi_flags_seen, starred, cf_blocked
+			last_check, created_at, status, user_paused, source, subscription_id, ipapiis_score, ipapi_flags, ipapi_flags_seen, starred, cf_blocked, dual_protocol
 		)
 		SELECT id, address, protocol, region, region_source, note, exit_ip, exit_location,
 			latency, quality_grade, use_count, success_count, fail_count, last_used,
-			last_check, created_at, status, user_paused, source, subscription_id, ipapiis_score, ipapi_flags, ipapi_flags_seen, starred, cf_blocked
+			last_check, created_at, status, user_paused, source, subscription_id, ipapiis_score, ipapi_flags, ipapi_flags_seen, starred, cf_blocked, dual_protocol
 		FROM proxies`); err != nil {
 		return fmt.Errorf("copy proxies_new: %w", err)
 	}
