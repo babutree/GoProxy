@@ -357,6 +357,70 @@ func TestDashboardProtocolBadgesShowMixedNodeDualLabels(t *testing.T) {
 	}
 }
 
+// TestDashboardWorldMap 验证"全球节点分布"地图卡片：纯前端内联 SVG(无外部依赖)、
+// COUNTRY_XY 国家坐标表(20+ 国家)、renderWorldMap 按 isAvailable&&isKnownRegion 聚合计数、
+// 点半径随节点数(log 映射)、CSS @keyframes 脉冲闪烁、活跃 session 连线(中心->国家)走
+// stroke-dasharray 流动动画，且 renderWorldMap() 在 loadProxies/loadSessions 中被调用。
+func TestDashboardWorldMap(t *testing.T) {
+	checks := []string{
+		// 地图卡片标题。
+		"<h3>全球节点分布</h3>",
+		// 内联 SVG 世界地图(equirectangular viewBox)，纯内联无外部文件/CDN。
+		"<svg id=\"world-map\" class=\"worldmap-svg\" viewBox=\"0 0 1000 500\"",
+		// 简化世界轮廓 land path。
+		"class=\"worldmap-land\"",
+		// 连线与亮点分组容器。
+		"<g id=\"worldmap-links\"></g>",
+		"<g id=\"worldmap-dots\"></g>",
+		// 国家坐标表(相对 viewBox 的近似位置)，覆盖常见国家。
+		"const COUNTRY_XY={",
+		"us:[228,142]",
+		"jp:[883,150]",
+		"hk:[817,189]",
+		"sg:[788,246]",
+		"kr:[855,149]",
+		"gb:[496,100]",
+		"de:[529,108]",
+		"fr:[506,121]",
+		"nl:[515,106]",
+		"ca:[206,94]",
+		"au:[869,319]",
+		"tw:[836,184]",
+		"in:[719,193]",
+		"ru:[750,81]",
+		// 全局会话缓存(供地图连线使用)。
+		"let worldMapSessions=[]",
+		// 渲染函数。
+		"function renderWorldMap(){",
+		// 按可用且已知地域的节点聚合计数(独立于 renderRegions 的 wmCounts)。
+		"wmCounts[r]=(wmCounts[r]||0)+1",
+		// 点半径随该国节点数增大(log 映射)。
+		"const radius=(4+3*Math.log(1+c)).toFixed(1)",
+		// 亮点 circle 类名(脉冲闪烁靠 CSS)。
+		"class=\"worldmap-dot\"",
+		// 活跃 session 连线：中心(网关)到该国坐标的 path。
+		"linkHTML+='<path class=\"worldmap-link\" d=\"M'+cx+' '+cy+' Q'+qx+' '+qy+' '+xy[0]+' '+xy[1]+'\"></path>'",
+		// CSS 脉冲闪烁 @keyframes(纯 CSS，不用 JS 定时器)。
+		"@keyframes wm-pulse",
+		".worldmap-dot{fill:var(--accent);animation:wm-pulse",
+		// 连线流动：stroke-dasharray + stroke-dashoffset 动画。
+		"stroke-dasharray:6 6",
+		"@keyframes wm-flow",
+		"stroke-dashoffset:-24",
+		// renderWorldMap() 在 loadProxies 成功后被调用。
+		"renderRegions();renderWorldMap()",
+		// renderWorldMap() 在 loadSessions 成功后被调用(先缓存 sessions)。
+		"worldMapSessions=Array.isArray(sessions)?sessions:[];renderWorldMap()",
+	}
+	for _, check := range checks {
+		t.Run(check, func(t *testing.T) {
+			if !strings.Contains(dashboardHTML, check) {
+				t.Fatalf("dashboardHTML missing world-map invariant %q", check)
+			}
+		})
+	}
+}
+
 // TestDashboardCopyProxyCredBuildsFullURL 验证需求2：copyProxyCred 复制完整代理 URL
 // 协议://用户名DSL:密码@IP:端口。密码取 configCache.proxy_auth_password（为空时留空并提示）；
 // mixed 节点用 confirm 选择 socks5/http，单协议节点直接用 p.protocol；成功 toast 显示完整 URL。
