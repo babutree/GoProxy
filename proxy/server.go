@@ -164,6 +164,12 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request, route auth.P
 		defer r.Body.Close()
 	}
 
+	// 内网/本地目标直连，不经上游节点（等同浏览器代理例外 / NO_PROXY）。
+	if isBypassTarget(r.Host) {
+		s.httpDirect(w, r, buffered, stream, replayable)
+		return
+	}
+
 	var tried []int64
 	for attempt := 0; attempt <= s.cfg.MaxRetry; attempt++ {
 		p, err := s.selectProxy(route, tried)
@@ -230,8 +236,46 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request, route auth.P
 	http.Error(w, "all proxies failed", http.StatusBadGateway)
 }
 
+// httpDirect 为内网/本地 HTTP 目标直连转发，不经上游节点、不重试（本地目标无需故障转移）。
+func (s *Server) httpDirect(w http.ResponseWriter, r *http.Request, buffered []byte, stream io.Reader, replayable bool) {
+	req, err := http.NewRequest(r.Method, r.URL.String(), forwardBody(buffered, stream, replayable))
+	if err != nil {
+		http.Error(w, "build direct request failed", http.StatusBadGateway)
+		return
+	}
+	if !replayable && stream != nil {
+		req.ContentLength = -1
+	}
+	req.Header = r.Header.Clone()
+	cleanForwardHeaders(req.Header)
+
+	client := &http.Client{Timeout: time.Duration(s.cfg.ValidateTimeout) * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("[proxy] %s direct (bypass upstream) failed: %v", r.RequestURI, err)
+		http.Error(w, "direct request failed", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	for k, vv := range resp.Header {
+		for _, v := range vv {
+			w.Header().Add(k, v)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
+	log.Printf("[proxy] %s direct (bypass upstream) -> %d", r.RequestURI, resp.StatusCode)
+}
+
 // handleTunnel 处理 HTTPS CONNECT 隧道（带自动重试）
 func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request, route auth.ParsedUsername) {
+	// 内网/本地目标直连，不经上游节点（等同浏览器代理例外 / NO_PROXY）。
+	if isBypassTarget(r.Host) {
+		s.tunnelDirect(w, r)
+		return
+	}
+
 	var tried []int64
 	for attempt := 0; attempt <= s.cfg.MaxRetry; attempt++ {
 		p, err := s.selectProxy(route, tried)
@@ -274,6 +318,32 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request, route auth
 	}
 
 	http.Error(w, "all proxies failed", http.StatusBadGateway)
+}
+
+// tunnelDirect 为内网/本地 CONNECT 目标建立直连隧道，不经上游节点。
+func (s *Server) tunnelDirect(w http.ResponseWriter, r *http.Request) {
+	timeout := time.Duration(s.cfg.ValidateTimeout) * time.Second
+	conn, err := net.DialTimeout("tcp", r.Host, timeout)
+	if err != nil {
+		log.Printf("[tunnel] direct dial %s failed: %v", r.Host, err)
+		http.Error(w, "direct dial failed", http.StatusBadGateway)
+		return
+	}
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		conn.Close()
+		http.Error(w, "hijack not supported", http.StatusInternalServerError)
+		return
+	}
+	clientConn, _, err := hijacker.Hijack()
+	if err != nil {
+		conn.Close()
+		return
+	}
+	fmt.Fprintf(clientConn, "HTTP/1.1 200 Connection Established\r\n\r\n")
+	log.Printf("[tunnel] %s direct (bypass upstream)", r.Host)
+	go transfer(conn, clientConn)
+	go transfer(clientConn, conn)
 }
 
 // maxReplayBodyBytes 限制为“可重放”而缓存进内存的请求体上限。

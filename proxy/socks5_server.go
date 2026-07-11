@@ -77,6 +77,12 @@ func (s *SOCKS5Server) handleConnection(clientConn net.Conn) {
 		return
 	}
 
+	// 内网/本地目标直连，不经上游节点（等同 NO_PROXY 例外）。
+	if isBypassTarget(target) {
+		s.socks5Direct(clientConn, target)
+		return
+	}
+
 	// 带重试的连接上游代理
 	// 重试机制：只使用 SOCKS5 协议的上游代理（天然支持 HTTPS）
 	tried := []int64{}
@@ -119,6 +125,25 @@ func (s *SOCKS5Server) handleConnection(clientConn net.Conn) {
 	// 所有重试都失败
 	s.sendSOCKS5Reply(clientConn, 0x01) // General failure
 	log.Printf("[socks5] all proxies failed for %s", target)
+}
+
+// socks5Direct 为内网/本地目标建立直连，不经上游节点。
+func (s *SOCKS5Server) socks5Direct(clientConn net.Conn, target string) {
+	timeout := time.Duration(s.cfg.ValidateTimeout) * time.Second
+	upstreamConn, err := net.DialTimeout("tcp", target, timeout)
+	if err != nil {
+		log.Printf("[socks5] direct dial %s failed: %v", target, err)
+		s.sendSOCKS5Reply(clientConn, 0x01) // General failure
+		return
+	}
+	if err := s.sendSOCKS5Reply(clientConn, 0x00); err != nil {
+		upstreamConn.Close()
+		return
+	}
+	log.Printf("[socks5] %s direct (bypass upstream)", target)
+	go io.Copy(upstreamConn, clientConn)
+	io.Copy(clientConn, upstreamConn)
+	upstreamConn.Close()
 }
 
 // selectSOCKS5Proxy 根据使用模式选择 SOCKS5 上游代理
