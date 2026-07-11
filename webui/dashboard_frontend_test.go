@@ -322,3 +322,67 @@ func TestDashboardConnectionExampleAvoidsHttpbinSinglePoint(t *testing.T) {
 		t.Fatal("dashboardHTML missing stable HTTPS connection example target")
 	}
 }
+
+// TestDashboardProtocolBadgesShowMixedNodeDualLabels 验证需求1：协议列改用 protocolBadges(p)，
+// dual_protocol=true 的 mixed 节点渲染 SOCKS5+HTTP 两个徽章，其余节点渲染单个协议徽章。
+// 方案Y：以存储层显式字段 p.dual_protocol 判定，而非靠地址长相猜测（避免本机 direct socks5 误判）。
+func TestDashboardProtocolBadgesShowMixedNodeDualLabels(t *testing.T) {
+	checks := []string{
+		// 新增封装函数，保持可测。
+		"function protocolBadges(p){",
+		// mixed 节点（dual_protocol=true）渲染两个徽章。
+		"if(isDualProtocol(p))return '<span class=\"badge blue\">SOCKS5</span> <span class=\"badge blue\">HTTP</span>'",
+		// 非 mixed 节点渲染单个存储协议徽章（沿用 html(p.protocol) 转义）。
+		"return '<span class=\"badge blue\">'+html(p.protocol).toUpperCase()+'</span>'",
+		// dual_protocol 显式判定函数（读后端下发的布尔字段）。
+		"function isDualProtocol(p){return !!(p&&(p.dual_protocol===true||Number(p.dual_protocol)===1))}",
+		// 行渲染协议列改为调用 protocolBadges(p)。
+		"<td>'+protocolBadges(p)+'</td>",
+	}
+	for _, check := range checks {
+		t.Run(check, func(t *testing.T) {
+			if !strings.Contains(dashboardHTML, check) {
+				t.Fatalf("dashboardHTML missing protocol-badges invariant %q", check)
+			}
+		})
+	}
+
+	// 回归防护：协议列不得再内联单徽章，须走 protocolBadges 封装。
+	if strings.Contains(dashboardHTML, "<td><span class=\"badge blue\">'+html(p.protocol).toUpperCase()+'</span></td>") {
+		t.Fatal("dashboardHTML still inlines single protocol badge in row instead of protocolBadges(p)")
+	}
+	// 回归防护：不得再靠地址长相猜 mixed（方案A 已被方案Y 取代）。
+	if strings.Contains(dashboardHTML, "if(addr.startsWith('127.0.0.1:'))return '<span class=\"badge blue\">SOCKS5</span>") {
+		t.Fatal("dashboardHTML still guesses mixed node by 127.0.0.1 address instead of dual_protocol field")
+	}
+}
+
+// TestDashboardCopyProxyCredBuildsFullURL 验证需求2：copyProxyCred 复制完整代理 URL
+// 协议://用户名DSL:密码@IP:端口。密码取 configCache.proxy_auth_password（为空时留空并提示）；
+// mixed 节点用 confirm 选择 socks5/http，单协议节点直接用 p.protocol；成功 toast 显示完整 URL。
+func TestDashboardCopyProxyCredBuildsFullURL(t *testing.T) {
+	checks := []string{
+		// 密码取自 config 下发缓存，为空容错。
+		"const pass=(configCache&&configCache.proxy_auth_password)?configCache.proxy_auth_password:''",
+		// 协议选择：mixed 节点（dual_protocol）confirm 选 socks5/http，否则用存储协议。
+		"const scheme=isDualProtocol(p)?(confirm('确定复制 SOCKS5？取消则复制 HTTP')?'socks5':'http'):String(p.protocol||'socks5')",
+		// 完整 URL 拼接：协议://用户名:密码@IP:端口。
+		"const url=scheme+'://'+user+':'+pass+'@'+addr",
+		// 密码未配置时提示。
+		"if(!pass)showToast('代理密码未配置')",
+		// 复制完整 URL 并成功提示。
+		"navigator.clipboard.writeText(url).then(()=>showToast('已复制: '+url))",
+	}
+	for _, check := range checks {
+		t.Run(check, func(t *testing.T) {
+			if !strings.Contains(dashboardHTML, check) {
+				t.Fatalf("dashboardHTML missing copy-full-url invariant %q", check)
+			}
+		})
+	}
+
+	// 回归防护：不得再只复制用户名 DSL（旧实现 writeText(cred)）。
+	if strings.Contains(dashboardHTML, "navigator.clipboard.writeText(cred)") {
+		t.Fatal("dashboardHTML copyProxyCred still copies bare username DSL instead of full proxy URL")
+	}
+}

@@ -36,6 +36,10 @@ type Proxy struct {
 	IPAPIFlagsSeen bool    `json:"ipapi_flags_seen"` // ip-api proxy/hosting/mobile 是否已完成探测；false 时前端显示未知
 	Starred        bool    `json:"starred"`
 	CFBlocked      int     `json:"cf_blocked"` // -1未探测 0未拦截 1被拦截
+	// DualProtocol 标记该节点的本地端口是否为 sing-box mixed 入站（单端口同时服务 SOCKS5+HTTP）。
+	// 拨号/验证/存储 protocol 仍为 socks5（mixed 端口对 socks5 客户端即标准 socks5）；
+	// 该字段仅供前端可靠渲染双协议标签，避免靠地址长相猜测而误判本机 direct socks5 节点。
+	DualProtocol bool `json:"dual_protocol"`
 }
 
 // Subscription 订阅信息
@@ -107,7 +111,8 @@ func (s *Storage) initSchema() error {
 			ipapi_flags    TEXT NOT NULL DEFAULT '',
 			ipapi_flags_seen INTEGER NOT NULL DEFAULT 0,
 			starred        INTEGER NOT NULL DEFAULT 0,
-			cf_blocked     INTEGER NOT NULL DEFAULT -1
+			cf_blocked     INTEGER NOT NULL DEFAULT -1,
+			dual_protocol  INTEGER NOT NULL DEFAULT 0
 		)
 	`)
 	if err != nil {

@@ -127,6 +127,20 @@ func (s *Storage) updateExitInfoWhere(where string, args []interface{}, exitIP, 
 	return requireRowsAffected(res.RowsAffected())
 }
 
+// SetProxyDualProtocol 置位/清位节点的双协议能力标记。
+// mixed 隧道节点（单端口同时服务 SOCKS5+HTTP）入库时置 true，供前端可靠区分双协议节点。
+func (s *Storage) SetProxyDualProtocol(id int64, dual bool) error {
+	dualInt := 0
+	if dual {
+		dualInt = 1
+	}
+	res, err := s.db.Exec(`UPDATE proxies SET dual_protocol = ? WHERE id = ?`, dualInt, id)
+	if err != nil {
+		return err
+	}
+	return requireRowsAffected(res.RowsAffected())
+}
+
 // SetProxyStarred 置位/清位节点星标。starred 转 0/1 写入 starred 列。
 func (s *Storage) SetProxyStarred(id int64, starred bool) error {
 	starredInt := 0
