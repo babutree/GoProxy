@@ -87,41 +87,27 @@ func TestSingBoxPortMapStableAcrossMultiSubscriptionReloads(t *testing.T) {
 	nodeA := tunnelNode("sub-a", "a.example.com", "password-a")
 	nodeB := tunnelNode("sub-b", "b.example.com", "password-b")
 
-	_, firstPorts, firstHTTPPorts := s.assembleConfig([]ParsedNode{nodeA})
+	_, firstPorts := s.assembleConfig([]ParsedNode{nodeA})
 	s.portMap = firstPorts
-	s.httpPortMap = firstHTTPPorts
-	_, secondPorts, secondHTTPPorts := s.assembleConfig([]ParsedNode{nodeB, nodeA})
+	_, secondPorts := s.assembleConfig([]ParsedNode{nodeB, nodeA})
 
 	if firstPorts[nodeA.NodeKey()] != secondPorts[nodeA.NodeKey()] {
-		t.Fatalf("existing node SOCKS5 port changed from %d to %d", firstPorts[nodeA.NodeKey()], secondPorts[nodeA.NodeKey()])
+		t.Fatalf("existing node port changed from %d to %d", firstPorts[nodeA.NodeKey()], secondPorts[nodeA.NodeKey()])
 	}
 	if secondPorts[nodeB.NodeKey()] == 0 {
-		t.Fatal("new node did not receive a SOCKS5 port")
+		t.Fatal("new node did not receive a port")
 	}
 	if secondPorts[nodeA.NodeKey()] == secondPorts[nodeB.NodeKey()] {
-		t.Fatal("different tunnel nodes received the same SOCKS5 port")
+		t.Fatal("different tunnel nodes received the same port")
 	}
 
-	// 方案 B：HTTP 端口同样应稳定、非零、且不与任何其他端口冲突。
-	if firstHTTPPorts[nodeA.NodeKey()] != secondHTTPPorts[nodeA.NodeKey()] {
-		t.Fatalf("existing node HTTP port changed from %d to %d", firstHTTPPorts[nodeA.NodeKey()], secondHTTPPorts[nodeA.NodeKey()])
-	}
-	if secondHTTPPorts[nodeA.NodeKey()] == 0 || secondHTTPPorts[nodeB.NodeKey()] == 0 {
-		t.Fatal("tunnel node did not receive an HTTP port")
-	}
-	// 所有 SOCKS5 与 HTTP 端口必须两两不同（同一 usedPorts 池分配）。
+	// 端口合并：每个 tunnel 节点仅一个 mixed 端口，所有端口必须两两不同。
 	seen := map[int]string{}
 	for key, p := range secondPorts {
 		if prev, dup := seen[p]; dup {
-			t.Fatalf("port %d reused by SOCKS5 %s and %s", p, key, prev)
+			t.Fatalf("port %d reused by %s and %s", p, key, prev)
 		}
-		seen[p] = "socks:" + key
-	}
-	for key, p := range secondHTTPPorts {
-		if prev, dup := seen[p]; dup {
-			t.Fatalf("port %d reused by HTTP %s and %s", p, key, prev)
-		}
-		seen[p] = "http:" + key
+		seen[p] = key
 	}
 }
 
@@ -136,12 +122,13 @@ func TestCollectAllTunnelNodesKeepsLoadedNodesWhenOtherSubscriptionFetchFails(t 
 		t.Fatalf("AddSubscription(good) error = %v", err)
 	}
 	oldNode := tunnelNode("old", "old.example.com", "password-old")
+	sb := NewSingBoxProcess("missing-sing-box", t.TempDir(), testSingBoxBasePort)
+	sb.nodes = []ParsedNode{oldNode}
+	sb.portMap = map[string]int{oldNode.NodeKey(): testSingBoxBasePort + 1}
 	m := &Manager{
 		storage: store,
-		singbox: NewSingBoxProcess("missing-sing-box", t.TempDir(), testSingBoxBasePort),
+		singbox: sb,
 	}
-	m.singbox.nodes = []ParsedNode{oldNode}
-	m.singbox.portMap = map[string]int{oldNode.NodeKey(): testSingBoxBasePort + 1}
 
 	nodes, err := m.collectAllTunnelNodes()
 	if err != nil {

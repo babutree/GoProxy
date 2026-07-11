@@ -76,7 +76,7 @@ func TestWaitPortsFreeReleasesMidWait(t *testing.T) {
 	releasePort := ln.Addr().(*net.TCPAddr).Port
 
 	s := NewSingBoxProcess("missing-sing-box", t.TempDir(), testSingBoxBasePort)
-	s.httpPortMap = map[string]int{"node-key": releasePort}
+	s.portMap = map[string]int{"node-key": releasePort}
 
 	// 300ms 后释放端口；waitPortsFreeLocked 应在 2s 超时内检测到释放并返回 0。
 	go func() {

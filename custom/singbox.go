@@ -27,8 +27,7 @@ type SingBoxProcess struct {
 	configFile string
 	basePort   int
 	portOffset int            // 端口范围偏移；已加载节点保持原端口，新节点从当前范围后续端口追加
-	portMap    map[string]int // nodeKey → 本地 SOCKS5 端口
-	httpPortMap map[string]int // nodeKey → 本地 HTTP 端口（方案 B：同一 tunnel 节点额外暴露 HTTP 入站）
+	portMap    map[string]int // nodeKey → 本地 mixed 端口（单端口同时服务 SOCKS5 与 HTTP）
 	nodes      []ParsedNode
 	mu         sync.Mutex
 	running    bool
@@ -74,7 +73,6 @@ func NewSingBoxProcess(binPath, dataDir string, basePort int) *SingBoxProcess {
 		configFile: filepath.Join(configDir, "config.json"),
 		basePort:   basePort,
 		portMap:    make(map[string]int),
-		httpPortMap: make(map[string]int),
 		status:     SingBoxStatusNoTunnelNodes,
 		reason:     SingBoxStatusNoTunnelNodes,
 	}
@@ -98,7 +96,6 @@ func (s *SingBoxProcess) Reload(nodes []ParsedNode) error {
 		s.stopLocked()
 		s.nodes = nil
 		s.portMap = make(map[string]int)
-		s.httpPortMap = make(map[string]int)
 		s.setStatusLocked(SingBoxStatusNoTunnelNodes, SingBoxStatusNoTunnelNodes, 0)
 		return nil
 	}
@@ -109,13 +106,11 @@ func (s *SingBoxProcess) Reload(nodes []ParsedNode) error {
 	// 生成配置
 	oldPortOffset := s.portOffset
 	oldPortMap := s.portMap
-	oldHTTPPortMap := s.httpPortMap
 	oldNodes := s.nodes
 	oldConfig, oldConfigErr := os.ReadFile(s.configFile)
 	restoreState := func() {
 		s.portOffset = oldPortOffset
 		s.portMap = oldPortMap
-		s.httpPortMap = oldHTTPPortMap
 		s.nodes = oldNodes
 		if oldConfigErr == nil {
 			if err := os.WriteFile(s.configFile, oldConfig, 0644); err != nil {
@@ -213,47 +208,43 @@ func (s *SingBoxProcess) pruneInvalidNodes(nodes []ParsedNode) []ParsedNode {
 
 // generateConfig 生成 sing-box JSON 配置并写入运行态（更新 s.portMap、写 configFile）。
 func (s *SingBoxProcess) generateConfig(nodes []ParsedNode) error {
-	config, portMap, httpPortMap := s.assembleConfig(nodes)
+	config, portMap := s.assembleConfig(nodes)
 	data, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
 		return err
 	}
 	s.portMap = portMap
-	s.httpPortMap = httpPortMap
 	return os.WriteFile(s.configFile, data, 0644)
 }
 
 // buildConfigBytes 生成配置 JSON 字节，但不改动运行态；供 checkNodes 探测校验使用。
 func (s *SingBoxProcess) buildConfigBytes(nodes []ParsedNode) ([]byte, error) {
-	config, _, _ := s.assembleConfig(nodes)
+	config, _ := s.assembleConfig(nodes)
 	return json.MarshalIndent(config, "", "  ")
 }
 
 // assembleConfig 组装 sing-box 配置 map 及对应的 nodeKey→port 映射，无副作用（不写状态/文件）。
-// 方案 B：每个 tunnel 节点同时生成 SOCKS5 与 HTTP 两个本地入站（各占一个端口），
-// 两个入站均路由到同一出站。返回 (config, socksPortMap, httpPortMap)。
-// SOCKS5 端口沿用旧映射保持稳定（不破坏既有入库地址）；HTTP 端口为方案 B 新增，
-// 同样从旧 httpPortMap 复用以保持稳定。两类端口共用同一 usedPorts 池避免冲突。
-func (s *SingBoxProcess) assembleConfig(nodes []ParsedNode) (map[string]interface{}, map[string]int, map[string]int) {
+// 端口合并（缺陷5，双端口2x→单端口）：每个 tunnel 节点只生成一个 sing-box `mixed` 本地入站，
+// 该单端口同时接受 SOCKS4/4a/5 与 HTTP 连接（mixed 为 sing-box 官方入站类型），路由到同一出站。
+// 返回 (config, portMap)。portMap 沿用旧映射保持稳定（不破坏既有入库地址）。
+func (s *SingBoxProcess) assembleConfig(nodes []ParsedNode) (map[string]interface{}, map[string]int) {
 	oldPortMap := make(map[string]int, len(s.portMap))
 	for key, port := range s.portMap {
 		oldPortMap[key] = port
 	}
-	oldHTTPPortMap := make(map[string]int, len(s.httpPortMap))
-	for key, port := range s.httpPortMap {
-		oldHTTPPortMap[key] = port
-	}
 	portMap := make(map[string]int, len(nodes))
-	httpPortMap := make(map[string]int, len(nodes))
-	usedPorts := make(map[int]bool, len(oldPortMap)+len(oldHTTPPortMap))
-	maxPort := s.basePort + s.portOffset
-	for _, port := range oldPortMap {
-		usedPorts[port] = true
-		if port > maxPort {
-			maxPort = port
-		}
+	// 仅以"将保留的节点"（本次仍在且此前已分配端口者）为基准计算端口占用与高水位。
+	// 被移除节点的端口随即释放、maxPort 回落，避免端口只增不减而最终耗尽分片段（缺陷4：端口泄漏）。
+	incoming := make(map[string]bool, len(nodes))
+	for _, n := range nodes {
+		incoming[n.NodeKey()] = true
 	}
-	for _, port := range oldHTTPPortMap {
+	usedPorts := make(map[int]bool, len(oldPortMap))
+	maxPort := s.basePort + s.portOffset
+	for key, port := range oldPortMap {
+		if !incoming[key] {
+			continue
+		}
 		usedPorts[port] = true
 		if port > maxPort {
 			maxPort = port
@@ -264,14 +255,20 @@ func (s *SingBoxProcess) assembleConfig(nodes []ParsedNode) (map[string]interfac
 		return orderedNodes[i].NodeKey() < orderedNodes[j].NodeKey()
 	})
 	port := maxPort
+	// 本分片实例独占端口段 [basePort, basePort+portRangeSpan)，越界会侵入下一分片段。
+	segmentEnd := s.basePort + portRangeSpan
 
-	// allocPort 复用旧端口以保持稳定，否则从 usedPorts 池分配一个未占用端口。
+	// allocPort 复用旧端口以保持稳定，否则在分片段内分配一个未占用端口；
+	// 段内已无空闲端口时返回 0，表示应跳过该节点（不得越入下一分片段）。
 	allocPort := func(key string, oldMap map[string]int) int {
 		if p, ok := oldMap[key]; ok {
 			return p
 		}
 		for {
 			port++
+			if port >= segmentEnd {
+				return 0
+			}
 			if !usedPorts[port] {
 				break
 			}
@@ -295,30 +292,26 @@ func (s *SingBoxProcess) assembleConfig(nodes []ParsedNode) (map[string]interfac
 			continue
 		}
 
-		socksPort := allocPort(key, oldPortMap)
-		portMap[key] = socksPort
-		httpPort := allocPort(key, oldHTTPPortMap)
-		httpPortMap[key] = httpPort
+		mixedPort := allocPort(key, oldPortMap)
+		if mixedPort == 0 {
+			// 分片端口段已满：跳过该节点（不生成入站/出站/路由，不占端口），与 buildOutbound 失败同一处理。
+			log.Printf("[custom] 分片端口段已满，跳过节点 %s (%s)", node.Name, node.Type)
+			continue
+		}
+		portMap[key] = mixedPort
 
-		// 入站：本地 SOCKS5 监听
+		// 入站：本地 mixed 监听（单端口同时服务 SOCKS5 与 HTTP），路由到该节点出站。
 		inbounds = append(inbounds, map[string]interface{}{
-			"type":        "socks",
+			"type":        "mixed",
 			"tag":         fmt.Sprintf("in-%s", tag),
 			"listen":      "127.0.0.1",
-			"listen_port": socksPort,
-		})
-		// 入站：本地 HTTP 监听（方案 B），与 SOCKS5 指向同一出站
-		inbounds = append(inbounds, map[string]interface{}{
-			"type":        "http",
-			"tag":         fmt.Sprintf("in-%s-http", tag),
-			"listen":      "127.0.0.1",
-			"listen_port": httpPort,
+			"listen_port": mixedPort,
 		})
 		outbounds = append(outbounds, outbound)
 
-		// 路由规则：两个入站 → 同一出站
+		// 路由规则：mixed 入站 → 同一出站
 		rules = append(rules, map[string]interface{}{
-			"inbound":  []string{fmt.Sprintf("in-%s", tag), fmt.Sprintf("in-%s-http", tag)},
+			"inbound":  []string{fmt.Sprintf("in-%s", tag)},
 			"outbound": fmt.Sprintf("out-%s", tag),
 		})
 	}
@@ -353,7 +346,7 @@ func (s *SingBoxProcess) assembleConfig(nodes []ParsedNode) (map[string]interfac
 			},
 		},
 	}
-	return config, portMap, httpPortMap
+	return config, portMap
 }
 
 // buildOutbound 根据节点类型构建 sing-box 出站配置。
@@ -669,7 +662,7 @@ func (s *SingBoxProcess) startLocked() error {
 
 	// 等待端口就绪（最多 10 秒）
 	log.Printf("[custom] sing-box 启动中，等待端口就绪（配置: %s）...", s.configFile)
-	totalPorts := len(s.portMap) + len(s.httpPortMap)
+	totalPorts := len(s.portMap)
 	readyPorts := 0
 	for i := 0; i < 20; i++ {
 		// 检查进程是否已退出
@@ -713,16 +706,13 @@ func (s *SingBoxProcess) setStatusLocked(status, reason string, readyPorts int) 
 const portReleaseTimeout = 5 * time.Second
 
 // waitPortsFreeLocked 在启动新 sing-box 进程前，轮询确认本次配置要监听的端口
-// （s.portMap + s.httpPortMap，因端口稳定复用，正是新进程将 bind 的端口）已释放。
+// （s.portMap，因端口稳定复用，正是新进程将 bind 的端口）已释放。
 // 返回超时后仍被占用的端口数量（0 表示全部已释放）。
 // 说明：这是"确认旧监听已消失"的探测——能连上说明旧进程仍在监听该端口，需继续等待；
 // 连不上（连接被拒）说明端口已释放，可安全 bind。带上限超时，避免无限等待。
 func (s *SingBoxProcess) waitPortsFreeLocked(timeout time.Duration) int {
-	ports := make([]int, 0, len(s.portMap)+len(s.httpPortMap))
+	ports := make([]int, 0, len(s.portMap))
 	for _, port := range s.portMap {
-		ports = append(ports, port)
-	}
-	for _, port := range s.httpPortMap {
 		ports = append(ports, port)
 	}
 	if len(ports) == 0 {
@@ -766,9 +756,6 @@ func (s *SingBoxProcess) countReadyPortsLocked(timeout time.Duration) int {
 		}
 	}
 	for _, port := range s.portMap {
-		dial(port)
-	}
-	for _, port := range s.httpPortMap {
 		dial(port)
 	}
 	return ready
@@ -863,7 +850,7 @@ func (s *SingBoxProcess) GetRuntimeStatus() SingBoxRuntimeStatus {
 		Reason:     reason,
 		Nodes:      len(s.portMap),
 		ReadyPorts: s.readyPorts,
-		TotalPorts: len(s.portMap) + len(s.httpPortMap),
+		TotalPorts: len(s.portMap),
 	}
 }
 
@@ -883,17 +870,6 @@ func (s *SingBoxProcess) GetPortMap() map[string]int {
 	defer s.mu.Unlock()
 	result := make(map[string]int, len(s.portMap))
 	for k, v := range s.portMap {
-		result[k] = v
-	}
-	return result
-}
-
-// GetHTTPPortMap 获取所有 HTTP 端口映射（方案 B：tunnel 节点的 HTTP 入站端口）
-func (s *SingBoxProcess) GetHTTPPortMap() map[string]int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	result := make(map[string]int, len(s.httpPortMap))
-	for k, v := range s.httpPortMap {
 		result[k] = v
 	}
 	return result

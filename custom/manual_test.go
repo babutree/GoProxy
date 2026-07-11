@@ -105,12 +105,13 @@ func TestAddManualNodeTunnel(t *testing.T) {
 		t.Fatalf("AddManualNode() error = %v", err)
 	}
 
+	// 端口合并（缺陷5）：单 mixed 端口 → 每个加密节点只入库一行（socks5 协议），不再有独立 HTTP 行。
 	count, err := store.CountBySource(storage.SourceManual)
 	if err != nil {
 		t.Fatalf("CountBySource() error = %v", err)
 	}
-	if count != 2 {
-		t.Fatalf("manual proxies = %d, want 2 (SOCKS5+HTTP)", count)
+	if count != 1 {
+		t.Fatalf("manual proxies = %d, want 1 (单 mixed 端口)", count)
 	}
 
 	port := m.singbox.GetPortMap()[node.NodeKey()]
@@ -121,15 +122,6 @@ func TestAddManualNodeTunnel(t *testing.T) {
 	}
 	if proxy.Protocol != "socks5" || proxy.Region != "jp" || proxy.Source != storage.SourceManual {
 		t.Fatalf("proxy = %q/%q/%q, want socks5/jp/manual", proxy.Protocol, proxy.Region, proxy.Source)
-	}
-	httpPort := m.singbox.GetHTTPPortMap()[node.NodeKey()]
-	httpAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(httpPort))
-	httpProxy, err := store.GetProxyByAddress(httpAddr)
-	if err != nil {
-		t.Fatalf("GetProxyByAddress(%s) error = %v", httpAddr, err)
-	}
-	if httpProxy.Protocol != "http" || httpProxy.Region != "jp" || httpProxy.Source != storage.SourceManual {
-		t.Fatalf("http proxy = %q/%q/%q, want http/jp/manual", httpProxy.Protocol, httpProxy.Region, httpProxy.Source)
 	}
 }
 
