@@ -120,16 +120,18 @@ func TestConfigGetReturnsActiveGatewayFieldsOnly(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode config response: %v", err)
 	}
+	// 代理密码明文下发给已认证前端，供一键复制含密码的完整代理 URL。
+	// WebUI 登录密码仍只存哈希、绝不下发；此处仅代理密码。
 	wantKeys := []string{
 		"allowed_countries", "blocked_countries", "default_region", "health_check_interval", "http_port", "max_retry",
-		"proxy_auth_enabled", "proxy_auth_username", "readonly_fields", "restart_required_fields", "session_ttl_minutes",
-		"singbox_path", "socks5_port", "webui_port",
+		"proxy_auth_enabled", "proxy_auth_password", "proxy_auth_username", "readonly_fields", "restart_required_fields",
+		"session_ttl_minutes", "singbox_path", "socks5_port", "webui_port",
 	}
 	if !reflect.DeepEqual(sortedKeys(got), wantKeys) {
 		t.Fatalf("config keys = %#v, want %#v; body=%s", sortedKeys(got), wantKeys, rec.Body.String())
 	}
-	if strings.Contains(rec.Body.String(), "secret") || strings.Contains(rec.Body.String(), "proxy_auth_password") {
-		t.Fatalf("config response leaked password: %s", rec.Body.String())
+	if got["proxy_auth_password"] != "secret" {
+		t.Fatalf("config GET 应下发代理密码明文以支持复制 URL，got proxy_auth_password=%v", got["proxy_auth_password"])
 	}
 	assertNoLegacyConfigFields(t, rec.Body.String())
 }
@@ -147,8 +149,10 @@ func TestConfigSavePersistsActiveEditableFields(t *testing.T) {
 	if server.cfg.ProxyAuthEnabled != true || server.cfg.ProxyAuthUsername != "edge" {
 		t.Fatalf("auth config = enabled:%v username:%q", server.cfg.ProxyAuthEnabled, server.cfg.ProxyAuthUsername)
 	}
-	if server.cfg.ProxyAuthPassword != "" || server.cfg.ProxyAuthPasswordHash != oldHash {
-		t.Fatalf("empty password changed stored password/hash: %q/%q", server.cfg.ProxyAuthPassword, server.cfg.ProxyAuthPasswordHash)
+	// 代理密码明文化后：提交空密码表示"不改"，旧明文与旧哈希都应原样保留
+	// （代理密码保留明文以支持复制含密码的完整代理 URL；提交空密码时明文与哈希均不变）。
+	if server.cfg.ProxyAuthPassword != "old-secret" || server.cfg.ProxyAuthPasswordHash != oldHash {
+		t.Fatalf("empty password submit should preserve old plain password/hash, got: %q/%q", server.cfg.ProxyAuthPassword, server.cfg.ProxyAuthPasswordHash)
 	}
 	if server.cfg.SessionTTLMinutes != 25 || server.cfg.DefaultRegion != "US" || server.cfg.HealthIntervalMinutes != 8 || server.cfg.MaxRetry != 0 {
 		t.Fatalf("runtime config = ttl:%d region:%q health:%d retry:%d", server.cfg.SessionTTLMinutes, server.cfg.DefaultRegion, server.cfg.HealthIntervalMinutes, server.cfg.MaxRetry)
@@ -888,7 +892,6 @@ func assertConfigJSONOmitsLegacyFields(t *testing.T, path string) {
 		t.Fatalf("read config file: %v", err)
 	}
 	assertNoLegacyConfigFields(t, string(data))
-	if strings.Contains(string(data), "proxy_auth_password\"") {
-		t.Fatalf("config persisted plain proxy password field: %s", string(data))
-	}
+	// 注：代理密码明文现按用户决策持久化（供复制含密码的完整 URL），故不再断言其缺失。
+	// WebUI 登录密码仍只存哈希，其安全模型由 config 包的 TestSaveKeepsWebUIPasswordHashOnly 守护。
 }
