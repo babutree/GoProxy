@@ -159,6 +159,9 @@ func bootstrapCredentials(cfg *Config) {
 		info.ProxyAuthUsername = cfg.ProxyAuthUsername
 		info.ProxyAuthPassword = generateCredential()
 		cfg.ProxyAuthPasswordHash = passwordHash(info.ProxyAuthPassword)
+		// 代理密码保留明文到运行态，供 Save 落盘、WebUI 复制含密码的完整代理 URL。
+		// 这是有意的设计取舍：代理密码明文存储，登录密码仍只存哈希，两者安全模型分开。
+		cfg.ProxyAuthPassword = info.ProxyAuthPassword
 	}
 	firstBoot = info
 	if err := Save(cfg); err != nil {
@@ -202,6 +205,7 @@ func Save(cfg *Config) error {
 		WebUIPasswordHash:     cfg.WebUIPasswordHash,
 		ProxyAuthEnabled:      &authEnabled,
 		ProxyAuthUsername:     cfg.ProxyAuthUsername,
+		ProxyAuthPassword:     cfg.ProxyAuthPassword,
 		ProxyAuthPasswordHash: cfg.ProxyAuthPasswordHash,
 		SessionTTLMinutes:     cfg.SessionTTLMinutes,
 		DefaultRegion:         NormalizeCountryCode(cfg.DefaultRegion),
@@ -220,7 +224,8 @@ func Save(cfg *Config) error {
 	}
 
 	saved := *cfg
-	saved.ProxyAuthPassword = ""
+	// 代理密码保留明文在运行态，供已认证 WebUI 一键复制含密码的完整代理 URL；不再清空。
+	// 注意：WebUI 登录密码仍只存哈希（WebUIPasswordHash），此处不涉及登录密码。
 	saved.DefaultRegion = NormalizeCountryCode(saved.DefaultRegion)
 	saved.BlockedCountries = NormalizeCountryCodes(saved.BlockedCountries)
 	saved.AllowedCountries = NormalizeCountryCodes(saved.AllowedCountries)
@@ -252,6 +257,10 @@ func applySavedConfig(cfg *Config, saved savedConfig) {
 	}
 	if saved.ProxyAuthUsername != "" {
 		cfg.ProxyAuthUsername = saved.ProxyAuthUsername
+	}
+	if saved.ProxyAuthPassword != "" {
+		// 代理密码明文往返恢复，供复制含密码的完整代理 URL。
+		cfg.ProxyAuthPassword = saved.ProxyAuthPassword
 	}
 	if saved.ProxyAuthPasswordHash != "" {
 		cfg.ProxyAuthPasswordHash = saved.ProxyAuthPasswordHash

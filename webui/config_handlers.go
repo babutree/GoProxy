@@ -22,6 +22,9 @@ func (s *Server) apiConfig(w http.ResponseWriter, r *http.Request) {
 		"webui_port":              cfg.WebUIPort,
 		"proxy_auth_enabled":      cfg.ProxyAuthEnabled,
 		"proxy_auth_username":     cfg.ProxyAuthUsername,
+		// 代理密码明文下发给已认证 WebUI，供前端拼接含密码的完整代理 URL 供一键复制。
+		// 登录密码仍只存哈希、绝不下发；此处仅下发代理认证密码。
+		"proxy_auth_password":     cfg.ProxyAuthPassword,
 		"session_ttl_minutes":     cfg.SessionTTLMinutes,
 		"default_region":          cfg.DefaultRegion,
 		"health_check_interval":   cfg.HealthIntervalMinutes,
@@ -75,10 +78,12 @@ func (s *Server) apiConfigSave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	newCfg := *oldCfg
-	newCfg.ProxyAuthPassword = ""
 	newCfg.ProxyAuthEnabled = req.ProxyAuthEnabled
 	newCfg.ProxyAuthUsername = username
+	// 代理密码保留明文到运行态并落盘，供已认证 WebUI 复制含密码的完整代理 URL。
+	// 仅当提交了新密码才更新；留空表示不改，沿用旧明文与旧哈希。
 	if req.ProxyAuthPassword != "" {
+		newCfg.ProxyAuthPassword = req.ProxyAuthPassword
 		newCfg.ProxyAuthPasswordHash = fmt.Sprintf("%x", sha256.Sum256([]byte(req.ProxyAuthPassword)))
 	}
 	newCfg.SessionTTLMinutes = req.SessionTTLMinutes
