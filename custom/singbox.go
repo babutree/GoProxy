@@ -273,41 +273,35 @@ func (s *SingBoxProcess) assembleConfig(nodes []ParsedNode) (map[string]interfac
 		incoming[n.NodeKey()] = true
 	}
 	usedPorts := make(map[int]bool, len(oldPortMap))
-	maxPort := s.basePort + s.portOffset
 	for key, port := range oldPortMap {
 		if !incoming[key] {
 			continue
 		}
 		usedPorts[port] = true
-		if port > maxPort {
-			maxPort = port
-		}
 	}
 	orderedNodes := append([]ParsedNode(nil), nodes...)
 	sort.SliceStable(orderedNodes, func(i, j int) bool {
 		return orderedNodes[i].NodeKey() < orderedNodes[j].NodeKey()
 	})
-	port := maxPort
 	// 本分片实例独占端口段 [basePort, basePort+portRangeSpan)，越界会侵入下一分片段。
+	// 扫描从 basePort 起（含），与历史“port++ 从 maxPort 起”对齐：首端口为 basePort+1。
+	segmentStart := s.basePort + 1
 	segmentEnd := s.basePort + portRangeSpan
 
-	// allocPort 复用旧端口以保持稳定，否则在分片段内分配一个未占用端口；
-	// 段内已无空闲端口时返回 0，表示应跳过该节点（不得越入下一分片段）。
+	// allocPort 复用旧端口以保持稳定；新节点从 basePort 起扫描段内空洞复用，
+	// 不得从高水位单调爬升导致中间空洞浪费；段满返回 0（跳过，不跨分片段）。
 	allocPort := func(key string, oldMap map[string]int) int {
 		if p, ok := oldMap[key]; ok {
 			return p
 		}
-		for {
-			port++
-			if port >= segmentEnd {
-				return 0
+		for p := segmentStart; p < segmentEnd; p++ {
+			if usedPorts[p] {
+				continue
 			}
-			if !usedPorts[port] {
-				break
-			}
+			usedPorts[p] = true
+			return p
 		}
-		usedPorts[port] = true
-		return port
+		return 0
 	}
 
 	var inbounds []map[string]interface{}

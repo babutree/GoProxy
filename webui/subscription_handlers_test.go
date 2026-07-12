@@ -62,6 +62,83 @@ func TestWriteSubscriptionFilePropagatesWriteErrorAndCleansUp(t *testing.T) {
 	}
 }
 
+// TestAPISubscriptionAddRejectsInvalidHeadersJSON 非法 headers JSON 必须 400，且不得入库。
+// 使用 file_content 路径，避免依赖外网；customMgr 为 nil 时仍应在 handler 层拒绝。
+func TestAPISubscriptionAddRejectsInvalidHeadersJSON(t *testing.T) {
+	server := newTestServer(t)
+	dataDir := t.TempDir()
+	t.Setenv("DATA_DIR", dataDir)
+
+	payload := `{"name":"bad-headers","file_content":"proxies:\n  - name: n\n    type: http\n    server: 1.1.1.1\n    port: 80\n","refresh_min":60,"headers":"{not-json"}`
+	req := authenticatedJSONRequest(http.MethodPost, "/api/subscription/add", payload)
+	rec := httptest.NewRecorder()
+	server.routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	subs, err := server.storage.GetSubscriptions()
+	if err != nil {
+		t.Fatalf("GetSubscriptions() error = %v", err)
+	}
+	if len(subs) != 0 {
+		t.Fatalf("invalid headers added %d subscriptions, want 0", len(subs))
+	}
+}
+
+// TestAPISubscriptionAddAcceptsValidHeadersWithFileContent 合法 headers 可随 file_content 入库。
+func TestAPISubscriptionAddAcceptsValidHeadersWithFileContent(t *testing.T) {
+	server := newTestServer(t)
+	dataDir := t.TempDir()
+	t.Setenv("DATA_DIR", dataDir)
+
+	headers := `{"User-Agent":"clash.meta"}`
+	payload := fmt.Sprintf(
+		`{"name":"ok-headers","file_content":"proxies:\n  - name: n\n    type: http\n    server: 1.1.1.1\n    port: 80\n","refresh_min":60,"headers":%q}`,
+		headers,
+	)
+	req := authenticatedJSONRequest(http.MethodPost, "/api/subscription/add", payload)
+	rec := httptest.NewRecorder()
+	server.routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	subs, err := server.storage.GetSubscriptions()
+	if err != nil {
+		t.Fatalf("GetSubscriptions() error = %v", err)
+	}
+	if len(subs) != 1 {
+		t.Fatalf("len(subs) = %d, want 1", len(subs))
+	}
+	if subs[0].Headers != headers {
+		t.Fatalf("headers = %q, want %q", subs[0].Headers, headers)
+	}
+}
+
+// TestAPISubscriptionAddEmptyHeadersOK 空 headers 合法，入库为空字符串（默认 UA 由拉取层补）。
+func TestAPISubscriptionAddEmptyHeadersOK(t *testing.T) {
+	server := newTestServer(t)
+	dataDir := t.TempDir()
+	t.Setenv("DATA_DIR", dataDir)
+
+	payload := `{"name":"empty-headers","file_content":"proxies:\n  - name: n\n    type: http\n    server: 1.1.1.1\n    port: 80\n","refresh_min":60,"headers":""}`
+	req := authenticatedJSONRequest(http.MethodPost, "/api/subscription/add", payload)
+	rec := httptest.NewRecorder()
+	server.routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	subs, err := server.storage.GetSubscriptions()
+	if err != nil {
+		t.Fatalf("GetSubscriptions() error = %v", err)
+	}
+	if len(subs) != 1 || subs[0].Headers != "" {
+		t.Fatalf("subs=%+v, want one with empty headers", subs)
+	}
+}
+
 // TestAPISubscriptionDeleteDoesNotPreDeleteProxiesWhenSubscriptionDeleteFails
 // 回归：handler 不得在 DeleteSubscription 事务外先 DeleteBySubscriptionID。
 // 否则 DeleteSubscription 失败后会留下“空订阅 + 代理已丢”的半删状态。

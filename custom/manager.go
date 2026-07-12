@@ -417,9 +417,9 @@ func (m *Manager) addPendingSubscriptionProxy(addr, proto string, subID int64, d
 	if dualProtocol {
 		if err := m.storage.SetProxyDualProtocol(proxy.ID, true); err != nil {
 			log.Printf("[custom] ⚠️ 标记订阅代理 %s 双协议失败: %v", addr, err)
-		} else {
-			proxy.DualProtocol = true
+			return nil, false
 		}
+		proxy.DualProtocol = true
 	}
 	return proxy, true
 }
@@ -476,6 +476,32 @@ func (m *Manager) fetchSubscriptionURL(urlStr, headersJSON string) ([]byte, erro
 	return io.ReadAll(resp.Body)
 }
 
+// parseSubscriptionHeaders 解析订阅自定义 headers JSON。
+// 空字符串 → 空 map（默认 UA）；非空必须是 JSON object 且值为 string。
+// null / 数组 / 非 string 值 / 非法 JSON 一律报错，禁止静默回退。
+func parseSubscriptionHeaders(headersJSON string) (map[string]string, error) {
+	if headersJSON == "" {
+		return map[string]string{}, nil
+	}
+	var custom map[string]string
+	if err := json.Unmarshal([]byte(headersJSON), &custom); err != nil {
+		return nil, fmt.Errorf("invalid subscription headers: %w", err)
+	}
+	// json.Unmarshal("null", &map) 成功但结果为 nil，必须拒绝。
+	if custom == nil {
+		return nil, fmt.Errorf("invalid subscription headers: must be a JSON object")
+	}
+	return custom, nil
+}
+
+// ValidateSubscriptionHeaders 校验订阅自定义 headers JSON：
+// 空字符串合法（使用默认 UA）；非空时必须是 JSON object 且值为 string。
+// 非法 JSON 显式报错，禁止静默回退默认 UA。
+func ValidateSubscriptionHeaders(headersJSON string) error {
+	_, err := parseSubscriptionHeaders(headersJSON)
+	return err
+}
+
 func buildSubscriptionRequest(urlStr, headersJSON string) (*http.Request, error) {
 	req, err := http.NewRequest("GET", urlStr, nil)
 	if err != nil {
@@ -483,18 +509,15 @@ func buildSubscriptionRequest(urlStr, headersJSON string) (*http.Request, error)
 	}
 	// 默认用 v2rayN UA，大部分机场都会返回完整的节点信息。
 	req.Header.Set("User-Agent", "v2rayN")
-	// 应用订阅自定义请求头：解析成功则逐个 Set（覆盖同名默认头）；
-	// 空或非法 JSON 时静默保留默认头，保证向后兼容。
-	if headersJSON != "" {
-		var custom map[string]string
-		if err := json.Unmarshal([]byte(headersJSON), &custom); err == nil {
-			for k, v := range custom {
-				if k != "" {
-					req.Header.Set(k, v)
-				}
-			}
-		} else {
-			log.Printf("[custom] ⚠️ 订阅自定义请求头解析失败，回退默认 UA: %v", err)
+	// 应用订阅自定义请求头：非空时必须是合法 JSON object；解析失败显式返回错误，
+	// 不静默回退默认 UA（避免添加/校验把坏配置当成功）。
+	custom, err := parseSubscriptionHeaders(headersJSON)
+	if err != nil {
+		return nil, err
+	}
+	for k, v := range custom {
+		if k != "" {
+			req.Header.Set(k, v)
 		}
 	}
 	return req, nil
@@ -748,10 +771,12 @@ func (m *Manager) addManualTunnelNode(node *ParsedNode, region, note string) err
 	}
 	// 手动加密节点是 mixed 端口（单端口同时服务 SOCKS5+HTTP），显式置位 dual_protocol，
 	// 供前端可靠渲染双协议标签，而非靠地址长相猜测。
-	if p, err := m.storage.GetProxyByAddress(mixedAddr); err == nil {
-		if err := m.storage.SetProxyDualProtocol(p.ID, true); err != nil {
-			log.Printf("[custom] ⚠️ 置位手动节点 dual_protocol 失败: %v", err)
-		}
+	p, err := m.storage.GetProxyByAddress(mixedAddr)
+	if err != nil {
+		return fmt.Errorf("读取手动节点 %s 失败: %w", mixedAddr, err)
+	}
+	if err := m.storage.SetProxyDualProtocol(p.ID, true); err != nil {
+		return fmt.Errorf("置位手动节点 dual_protocol 失败: %w", err)
 	}
 	return nil
 }

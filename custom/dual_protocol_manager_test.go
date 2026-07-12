@@ -44,3 +44,33 @@ func TestAddPendingSubscriptionProxyMarksDualProtocol(t *testing.T) {
 		t.Fatal("direct 节点 dual_protocol = true, want false")
 	}
 }
+
+// TestAddPendingSubscriptionProxyFailsWhenDualProtocolSetFails 注入 SetProxyDualProtocol 失败：
+// dualProtocol=true 时置位失败不得返回 ok=true（禁止 log-only 当成功）。
+func TestAddPendingSubscriptionProxyFailsWhenDualProtocolSetFails(t *testing.T) {
+	store := newTestStorage(t)
+	subID, err := store.AddSubscription("sub", "https://example.invalid/x", "", "auto", 60, "")
+	if err != nil {
+		t.Fatalf("AddSubscription() error = %v", err)
+	}
+
+	// 注入失败：UPDATE dual_protocol 时触发 SQLite 错误，模拟 SetProxyDualProtocol 失败。
+	if _, err := store.GetDB().Exec(`
+		CREATE TRIGGER fail_dual_protocol_update
+		BEFORE UPDATE OF dual_protocol ON proxies
+		BEGIN
+			SELECT RAISE(ABORT, 'injected dual_protocol update failure');
+		END
+	`); err != nil {
+		t.Fatalf("install dual_protocol fail trigger: %v", err)
+	}
+
+	m := &Manager{storage: store}
+	proxy, ok := m.addPendingSubscriptionProxy("127.0.0.1:21001", "socks5", subID, true)
+	if ok {
+		t.Fatalf("addPendingSubscriptionProxy(dualProtocol=true) ok=true after SetProxyDualProtocol failure, proxy=%v; want ok=false", proxy)
+	}
+	if proxy != nil {
+		t.Fatalf("addPendingSubscriptionProxy returned non-nil proxy on dual_protocol failure: %+v", proxy)
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"goproxy/config"
+	"goproxy/custom"
 	"goproxy/storage"
 )
 
@@ -118,6 +119,10 @@ func (s *Server) apiSubscriptionAdd(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.URL == "" && req.FileContent == "" {
 		jsonError(w, "请填写订阅 URL 或上传配置文件", http.StatusBadRequest)
+		return
+	}
+	if err := custom.ValidateSubscriptionHeaders(req.Headers); err != nil {
+		jsonError(w, "invalid headers", http.StatusBadRequest)
 		return
 	}
 	if req.RefreshMin <= 0 {

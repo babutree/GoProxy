@@ -19,6 +19,41 @@ func TestFetchSubscriptionURLCustomUserAgentOverridesDefault(t *testing.T) {
 	}
 }
 
+// TestBuildSubscriptionRequestRejectsInvalidHeadersJSON 非法 headers 必须显式报错，
+// 不得静默回退默认 UA（否则添加/校验路径会把坏配置当成功）。
+func TestBuildSubscriptionRequestRejectsInvalidHeadersJSON(t *testing.T) {
+	invalid := []string{
+		`{not-json`,
+		`["User-Agent","clash"]`,
+		`{"User-Agent":123}`,
+		`null`,
+	}
+	for _, headersJSON := range invalid {
+		t.Run(headersJSON, func(t *testing.T) {
+			req, err := buildSubscriptionRequest("https://example.com/sub", headersJSON)
+			if err == nil {
+				t.Fatalf("buildSubscriptionRequest(%q) error = nil, want invalid headers error; req UA=%q",
+					headersJSON, req.Header.Get("User-Agent"))
+			}
+			if !strings.Contains(err.Error(), "headers") {
+				t.Fatalf("error = %v, want headers-related message", err)
+			}
+		})
+	}
+}
+
+// TestValidateSubscriptionHeadersEmptyOK 空 headers 合法（默认 UA 路径）。
+// ValidateSubscriptionHeaders 由 TODO #8 引入；在其落地前用 buildSubscriptionRequest 校验空值路径。
+func TestValidateSubscriptionHeadersEmptyOK(t *testing.T) {
+	req, err := buildSubscriptionRequest("https://example.com/sub", "")
+	if err != nil {
+		t.Fatalf("empty headers must be valid: %v", err)
+	}
+	if got := req.Header.Get("User-Agent"); got != "v2rayN" {
+		t.Fatalf("User-Agent = %q, want default v2rayN", got)
+	}
+}
+
 // TestFetchSubscriptionURLEmptyHeadersKeepsDefaultUA 向后兼容：headers 为空时，
 // 服务器必须收到默认 v2rayN UA（不许破坏现有订阅拉取）。
 func TestFetchSubscriptionURLEmptyHeadersKeepsDefaultUA(t *testing.T) {

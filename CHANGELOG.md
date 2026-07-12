@@ -28,6 +28,12 @@
 
 ### 修复
 
+- 不完整/Partial 重载不再删除旧订阅代理；分片 Partial 纳入健康恢复
+- 订阅删除仅走存储事务；headers 非法 JSON 在添加时拒绝
+- dual_protocol 置位失败不再静默成功；端口空洞可复用
+- HTTP 入站 SOCKS5 上游握手超时；link-local 不网关直连
+- GetProxyByAddress 同址多身份显式歧义错误；复制凭据 toast 不回显密码
+
 - sing-box 重启时端口 bind 竞态（等待旧监听释放后再启动）
 - 端口高水位泄漏与分片端口段超限保护
 - 分片崩溃后因 assignedKeys 跳过导致永不恢复
