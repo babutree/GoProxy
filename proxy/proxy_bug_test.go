@@ -630,6 +630,119 @@ func TestHTTPConnectDialWithZeroTimeoutDoesNotExpireImmediately(t *testing.T) {
 	conn.Close()
 }
 
+func TestSOCKS5InboundPartialGreetingTimesOut(t *testing.T) {
+	cfg := proxyTestConfig(0)
+	cfg.ValidateTimeout = 1
+	server := newSocks5TestServer(newProxyTestStore(), cfg)
+	client, serverConn := net.Pipe()
+	defer client.Close()
+
+	done := make(chan struct{})
+	go func() {
+		server.handleConnection(serverConn)
+		close(done)
+	}()
+	if _, err := client.Write([]byte{0x05}); err != nil {
+		t.Fatalf("write partial greeting: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(1500 * time.Millisecond):
+		t.Fatal("partial SOCKS5 greeting kept the inbound connection open past ValidateTimeout")
+	}
+}
+
+func TestSOCKS5InboundDeadlineIsClearedAfterRequest(t *testing.T) {
+	_, echoPort := startLocalEcho(t)
+	cfg := proxyTestConfig(0)
+	cfg.ValidateTimeout = 1
+	server := newSocks5TestServer(newProxyTestStore(), cfg)
+	client, serverConn := net.Pipe()
+	t.Cleanup(func() { _ = client.Close() })
+	go server.handleConnection(serverConn)
+
+	writeSocks5NoAuthHandshake(t, client)
+	writeSocks5DomainRequest(t, client, "127.0.0.1", echoPort)
+	reply := make([]byte, 10)
+	if err := readFullDeadline(t, client, reply); err != nil {
+		t.Fatalf("read SOCKS5 reply: %v", err)
+	}
+	if reply[1] != 0x00 {
+		t.Fatalf("SOCKS5 reply code = %#x, want success", reply[1])
+	}
+
+	time.Sleep(1100 * time.Millisecond)
+	payload := []byte("after-handshake-deadline")
+	if err := writeDeadline(t, client, payload); err != nil {
+		t.Fatalf("write after handshake timeout: %v", err)
+	}
+	got := make([]byte, len(payload))
+	if err := readFullDeadline(t, client, got); err != nil {
+		t.Fatalf("read after handshake timeout: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("echo = %q, want %q", got, payload)
+	}
+}
+
+func TestSOCKS5InboundPartialAuthAndRequestTimeOut(t *testing.T) {
+	tests := []struct {
+		name        string
+		authEnabled bool
+		write       func(*testing.T, net.Conn)
+	}{
+		{
+			name:        "partial auth",
+			authEnabled: true,
+			write: func(t *testing.T, conn net.Conn) {
+				if _, err := conn.Write([]byte{0x05, 0x01, 0x02}); err != nil {
+					t.Fatalf("write greeting: %v", err)
+				}
+				reply := make([]byte, 2)
+				if err := readFullDeadline(t, conn, reply); err != nil {
+					t.Fatalf("read method reply: %v", err)
+				}
+				if _, err := conn.Write([]byte{0x01, 0x05, 'p'}); err != nil {
+					t.Fatalf("write partial auth: %v", err)
+				}
+			},
+		},
+		{
+			name: "partial request",
+			write: func(t *testing.T, conn net.Conn) {
+				writeSocks5NoAuthHandshake(t, conn)
+				if _, err := conn.Write([]byte{0x05, 0x01}); err != nil {
+					t.Fatalf("write partial request: %v", err)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := proxyTestConfig(0)
+			cfg.ValidateTimeout = 1
+			cfg.ProxyAuthEnabled = tt.authEnabled
+			server := newSocks5TestServer(newProxyTestStore(), cfg)
+			client, serverConn := net.Pipe()
+			defer client.Close()
+			done := make(chan struct{})
+			go func() {
+				server.handleConnection(serverConn)
+				close(done)
+			}()
+
+			tt.write(t, client)
+			select {
+			case <-done:
+			case <-time.After(1500 * time.Millisecond):
+				t.Fatal("partial SOCKS5 frame kept the inbound connection open past ValidateTimeout")
+			}
+		})
+	}
+}
+
 // countingReader 产生指定字节数的零填充数据，并记录被实际读取的字节数，
 // 用于验证超限 body 不会被整体读入内存（BUG-54）。
 type countingReader struct {

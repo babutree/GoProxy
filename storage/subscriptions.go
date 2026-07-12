@@ -153,19 +153,25 @@ func (s *Storage) GetSubscription(id int64) (*Subscription, error) {
 
 // UpdateSubscriptionFetch 更新订阅的最后拉取时间和代理数
 func (s *Storage) UpdateSubscriptionFetch(id int64, proxyCount int) error {
-	_, err := s.db.Exec(
+	res, err := s.db.Exec(
 		`UPDATE subscriptions SET last_fetch = CURRENT_TIMESTAMP, proxy_count = ? WHERE id = ?`,
 		proxyCount, id,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	return requireRowsAffected(res.RowsAffected())
 }
 
 // UpdateSubscriptionSuccess 记录订阅最后一次有可用节点的时间
 func (s *Storage) UpdateSubscriptionSuccess(id int64) error {
-	_, err := s.db.Exec(
+	res, err := s.db.Exec(
 		`UPDATE subscriptions SET last_success = CURRENT_TIMESTAMP WHERE id = ?`, id,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	return requireRowsAffected(res.RowsAffected())
 }
 
 // GetStaleSubscriptions 获取连续 N 天无可用节点的订阅

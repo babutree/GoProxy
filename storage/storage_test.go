@@ -2,6 +2,7 @@ package storage
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -309,6 +310,79 @@ func TestDeleteSubscriptionDeletesProxiesAtomically(t *testing.T) {
 	}
 	if _, err := store.GetProxyByIdentity("delete-me:8080", SourceSubscription, subID); err == nil {
 		t.Fatal("subscription proxy should be deleted with subscription")
+	}
+}
+
+func TestDeleteSubscriptionRollsBackProxyDeleteWhenSubscriptionDeleteFails(t *testing.T) {
+	store := newTestStorage(t)
+	subID, err := store.AddSubscription("sub", "https://example.test/delete-failure.yaml", "", "auto", 60, "")
+	if err != nil {
+		t.Fatalf("AddSubscription() error = %v", err)
+	}
+	if err := store.AddProxyWithSource("keep-on-delete-failure:8080", "http", SourceSubscription, subID); err != nil {
+		t.Fatalf("AddProxyWithSource() error = %v", err)
+	}
+	if _, err := store.db.Exec(`
+		CREATE TRIGGER fail_subscription_delete
+		BEFORE DELETE ON subscriptions
+		WHEN OLD.id = ` + fmt.Sprint(subID) + `
+		BEGIN
+			SELECT RAISE(ABORT, 'forced subscription delete failure');
+		END`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+
+	if err := store.DeleteSubscription(subID); err == nil {
+		t.Fatal("DeleteSubscription() expected error, got nil")
+	}
+	if _, err := store.GetSubscription(subID); err != nil {
+		t.Fatalf("subscription removed after failed delete: %v", err)
+	}
+	if _, err := store.GetProxyByIdentity("keep-on-delete-failure:8080", SourceSubscription, subID); err != nil {
+		t.Fatalf("proxy removed after failed subscription delete: %v", err)
+	}
+}
+
+func TestSubscriptionMetadataUpdatesRejectMissingID(t *testing.T) {
+	store := newTestStorage(t)
+	const missingID = int64(999999)
+	t.Run("fetch", func(t *testing.T) {
+		if err := store.UpdateSubscriptionFetch(missingID, 12); !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("UpdateSubscriptionFetch() error = %v, want sql.ErrNoRows", err)
+		}
+	})
+	t.Run("success", func(t *testing.T) {
+		if err := store.UpdateSubscriptionSuccess(missingID); !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("UpdateSubscriptionSuccess() error = %v, want sql.ErrNoRows", err)
+		}
+	})
+}
+
+func TestDisableBlockedCountriesRollsBackOnPartialFailure(t *testing.T) {
+	store := newTestStorage(t)
+	insertProxy(t, store, "us-block:8080", "http", "us", SourceManual, 100, "active", 0)
+	insertProxy(t, store, "cn-block:8080", "http", "cn", SourceManual, 100, "active", 0)
+	if _, err := store.db.Exec(`
+		CREATE TRIGGER fail_cn_disable
+		BEFORE UPDATE OF status ON proxies
+		WHEN OLD.address = 'cn-block:8080' AND NEW.status = 'disabled'
+		BEGIN
+			SELECT RAISE(ABORT, 'forced country disable failure');
+		END`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+
+	if _, err := store.DisableBlockedCountries([]string{"US", "CN"}); err == nil {
+		t.Fatal("DisableBlockedCountries() expected error, got nil")
+	}
+	for _, address := range []string{"us-block:8080", "cn-block:8080"} {
+		proxy, err := store.GetProxyByAddress(address)
+		if err != nil {
+			t.Fatalf("GetProxyByAddress(%q) error = %v", address, err)
+		}
+		if proxy.Status != "active" {
+			t.Fatalf("proxy %q status = %q after rollback, want active", address, proxy.Status)
+		}
 	}
 }
 

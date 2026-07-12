@@ -682,7 +682,84 @@ func TestConfigSaveErrorsAreSanitized(t *testing.T) {
 		if rec.Body.String() != "{\"error\":\"failed to apply country filters\"}\n" {
 			t.Fatalf("response leaked storage detail: %s", rec.Body.String())
 		}
+		if server.cfg.ProxyAuthUsername != "old" || server.cfg.SessionTTLMinutes != 10 {
+			t.Fatalf("server config changed after filter failure: %#v", server.cfg)
+		}
+		if server.affinity.TTL() != 10*time.Minute {
+			t.Fatalf("affinity TTL = %v, want 10m after filter failure", server.affinity.TTL())
+		}
+		if got := config.Get(); got.ProxyAuthUsername != "old" || got.SessionTTLMinutes != 10 {
+			t.Fatalf("global config changed after filter failure: %#v", got)
+		}
+		data, err := os.ReadFile(filepath.Clean(config.ConfigFile()))
+		if err != nil {
+			t.Fatalf("read persisted config: %v", err)
+		}
+		if strings.Contains(string(data), `"proxy_auth_username": "new"`) {
+			t.Fatalf("new config remained persisted after filter failure: %s", data)
+		}
 	})
+}
+
+func TestConfigSaveCountryFilterFailureRollsBackWhenServerConfigAliasesGlobal(t *testing.T) {
+	server := newTestServer(t)
+	oldCfg := *server.cfg
+	oldCfg.ProxyAuthUsername = "old"
+	oldCfg.SessionTTLMinutes = 10
+	oldCfg.HealthIntervalMinutes = 5
+	oldCfg.SingBoxPath = "sing-box"
+	setTestGlobalConfig(t, &oldCfg)
+	server.cfg = config.Get()
+	if err := server.storage.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	payload := `{"proxy_auth_username":"new","session_ttl_minutes":25,"health_check_interval":5,"max_retry":0,"singbox_path":"sing-box","blocked_countries":["CN"]}`
+
+	serveAuthenticated(t, server, "/api/config/save", payload, http.StatusInternalServerError)
+
+	if server.cfg.ProxyAuthUsername != "old" || server.cfg.SessionTTLMinutes != 10 {
+		t.Fatalf("aliased server config not rolled back: %#v", server.cfg)
+	}
+	if got := config.Get(); got.ProxyAuthUsername != "old" || got.SessionTTLMinutes != 10 {
+		t.Fatalf("aliased global config not rolled back: %#v", got)
+	}
+	if server.affinity.TTL() != 10*time.Minute {
+		t.Fatalf("affinity TTL = %v, want 10m", server.affinity.TTL())
+	}
+}
+
+func TestSecurityStateActivityPrunesExpiredEntries(t *testing.T) {
+	resetWebUISecurityState()
+	now := time.Now()
+	sessionsMu.Lock()
+	sessions["expired"] = now.Add(-time.Second)
+	sessions["active"] = now.Add(time.Hour)
+	sessionsMu.Unlock()
+	loginAttemptsMu.Lock()
+	loginAttempts["stale"] = loginAttempt{Failures: 1, LastFailure: now.Add(-2 * loginLockout)}
+	loginAttempts["recent"] = loginAttempt{Failures: 1, LastFailure: now.Add(-loginLockout / 2)}
+	loginAttemptsMu.Unlock()
+
+	_ = newSession()
+	req := httptest.NewRequest(http.MethodPost, "/login", nil)
+	req.RemoteAddr = "198.51.100.90:1234"
+	recordLoginFailure(req, now)
+
+	sessionsMu.Lock()
+	_, expiredExists := sessions["expired"]
+	_, activeExists := sessions["active"]
+	sessionsMu.Unlock()
+	if expiredExists || !activeExists {
+		t.Fatalf("session cleanup: expired exists=%v active exists=%v", expiredExists, activeExists)
+	}
+	loginAttemptsMu.Lock()
+	_, staleExists := loginAttempts["stale"]
+	_, recentExists := loginAttempts["recent"]
+	_, currentExists := loginAttempts["198.51.100.90"]
+	loginAttemptsMu.Unlock()
+	if staleExists || !recentExists || !currentExists {
+		t.Fatalf("login cleanup: stale=%v recent=%v current=%v", staleExists, recentExists, currentExists)
+	}
 }
 
 func TestAuthCheckIsPublicAndNeutral(t *testing.T) {

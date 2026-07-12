@@ -489,7 +489,7 @@ func TestDashboardAIReachabilityColumnAndBadges(t *testing.T) {
 }
 
 // TestDashboardSubscriptionCustomHeaders 验证订阅弹窗含自定义请求头输入框，
-// 且 addSubscription() 读取该输入框并随 payload 以 headers 字段发送（解决 issue#34）。
+// 且 addSubscription() 读取该输入框并随 payload 以 headers 字段发送。
 func TestDashboardSubscriptionCustomHeaders(t *testing.T) {
 	checks := []string{
 		// 弹窗新增 headers 输入框（textarea），带 JSON 示例 placeholder。

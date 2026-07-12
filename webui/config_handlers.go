@@ -71,12 +71,12 @@ func (s *Server) apiConfigSave(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 更新配置
-	oldCfg := config.Get()
+	oldCfg := *config.Get()
 	if portChanged(req.HTTPPort, oldCfg.HTTPPort) || portChanged(req.SOCKS5Port, oldCfg.SOCKS5Port) || portChanged(req.WebUIPort, oldCfg.WebUIPort) {
 		jsonError(w, "port fields are read-only at runtime and require restart", http.StatusBadRequest)
 		return
 	}
-	newCfg := *oldCfg
+	newCfg := oldCfg
 	newCfg.ProxyAuthEnabled = req.ProxyAuthEnabled
 	newCfg.ProxyAuthUsername = username
 	// 代理密码保留明文到运行态并落盘，供已认证 WebUI 复制含密码的完整代理 URL。
@@ -102,6 +102,11 @@ func (s *Server) apiConfigSave(w http.ResponseWriter, r *http.Request) {
 	s.affinity.SetTTL(time.Duration(newCfg.SessionTTLMinutes) * time.Minute)
 	if err := s.applyCountryFilters(&newCfg); err != nil {
 		log.Printf("[webui] apply country filters failed: %v", err)
+		if rollbackErr := config.Save(&oldCfg); rollbackErr != nil {
+			log.Printf("[webui] rollback config after country filter failure failed: %v", rollbackErr)
+		}
+		*s.cfg = oldCfg
+		s.affinity.SetTTL(time.Duration(oldCfg.SessionTTLMinutes) * time.Minute)
 		jsonError(w, "failed to apply country filters", http.StatusInternalServerError)
 		return
 	}

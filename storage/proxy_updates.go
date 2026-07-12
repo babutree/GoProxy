@@ -214,17 +214,28 @@ func (s *Storage) DisableBlockedCountries(countryCodes []string) (int64, error) 
 	if len(countryCodes) == 0 {
 		return 0, nil
 	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
 	var total int64
 	for _, code := range countryCodes {
-		res, err := s.db.Exec(
+		res, err := tx.Exec(
 			`UPDATE proxies SET status = 'disabled' WHERE status = 'active' AND (region = ? OR exit_location = ? OR exit_location LIKE ?)`,
 			normalizeRegion(code), strings.ToUpper(code), strings.ToUpper(code)+" %",
 		)
 		if err != nil {
-			return total, err
+			return 0, err
 		}
-		affected, _ := res.RowsAffected()
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return 0, err
+		}
 		total += affected
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
 	}
 	return total, nil
 }

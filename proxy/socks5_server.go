@@ -62,6 +62,13 @@ func (s *SOCKS5Server) Start() error {
 // handleConnection 处理 SOCKS5 连接
 func (s *SOCKS5Server) handleConnection(clientConn net.Conn) {
 	defer clientConn.Close()
+	protocolTimeout := time.Duration(s.cfg.ValidateTimeout) * time.Second
+	if protocolTimeout > 0 {
+		if err := clientConn.SetDeadline(time.Now().Add(protocolTimeout)); err != nil {
+			log.Printf("[socks5] set inbound protocol deadline failed: %v", err)
+			return
+		}
+	}
 
 	// SOCKS5 握手
 	route, err := s.socks5Handshake(clientConn)
@@ -75,6 +82,12 @@ func (s *SOCKS5Server) handleConnection(clientConn net.Conn) {
 	if err != nil {
 		log.Printf("[socks5] read request failed: %v", err)
 		return
+	}
+	if protocolTimeout > 0 {
+		if err := clientConn.SetDeadline(time.Time{}); err != nil {
+			log.Printf("[socks5] clear inbound protocol deadline failed: %v", err)
+			return
+		}
 	}
 
 	// 内网/本地目标直连，不经上游节点（等同 NO_PROXY 例外）。

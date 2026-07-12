@@ -54,9 +54,18 @@ func newSession() string {
 	}
 	token := hex.EncodeToString(raw)
 	sessionsMu.Lock()
+	pruneExpiredSessionsLocked(time.Now())
 	sessions[token] = time.Now().Add(sessionTTL)
 	sessionsMu.Unlock()
 	return token
+}
+
+func pruneExpiredSessionsLocked(now time.Time) {
+	for token, expiry := range sessions {
+		if !expiry.After(now) {
+			delete(sessions, token)
+		}
+	}
 }
 
 func validSession(r *http.Request) bool {
@@ -138,6 +147,7 @@ func recordLoginFailure(r *http.Request, now time.Time) {
 	key := loginClientKey(r)
 	loginAttemptsMu.Lock()
 	defer loginAttemptsMu.Unlock()
+	pruneStaleLoginAttemptsLocked(now)
 	attempt := loginAttempts[key]
 	if now.Sub(attempt.LastFailure) > loginLockout {
 		attempt.Failures = 0
@@ -148,6 +158,14 @@ func recordLoginFailure(r *http.Request, now time.Time) {
 		attempt.LockedUntil = now.Add(loginLockout)
 	}
 	loginAttempts[key] = attempt
+}
+
+func pruneStaleLoginAttemptsLocked(now time.Time) {
+	for key, attempt := range loginAttempts {
+		if !attempt.LockedUntil.After(now) && now.Sub(attempt.LastFailure) > loginLockout {
+			delete(loginAttempts, key)
+		}
+	}
 }
 
 func recordLoginSuccess(r *http.Request) {
