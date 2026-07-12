@@ -10,6 +10,8 @@
 ### 新增
 
 - **会话占用上限**（可选）：max_sessions_per_proxy / MAX_SESSIONS_PER_PROXY，默认 0 不限制；>0 时新 session 绑定受每节点上限约束
+- **代理节点冷却 CD**（可选）：proxy_cooldown_minutes / PROXY_COOLDOWN_MINUTES，默认 0 关闭；>0 时新 session 首次绑定后，冷却期内其他新 session 不选该节点；同 session 粘性不受影响；无 session 的 Pick 忽略冷却
+- **节点占用可观测 API**：已认证 `GET /api/proxy-occupancy` 返回每节点 `proxy_id` / `address` / `active_sessions` / `max_sessions` / `cooldown_remaining_seconds`（#15 未合入时冷却为 0）；无密码字段
 
 - **sing-box 分片多进程**
   - `ShardedSingBox` 将隧道节点按稳定哈希切到 N 个独立进程（默认 4，可配置）

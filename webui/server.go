@@ -217,7 +217,7 @@ func (s *Server) Start() {
 //   - 来自本机回环地址的健康探活（docker healthcheck 每 30s 请求 GET /）
 func isNoiseRequest(r *http.Request) bool {
 	switch r.URL.Path {
-	case "/api/logs", "/api/stats", "/api/sessions":
+	case "/api/logs", "/api/stats", "/api/sessions", "/api/proxy-occupancy":
 		return true
 	}
 	// docker healthcheck: GET / from loopback。真人从其它地址访问 / 仍会记录。
@@ -254,6 +254,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/logs", s.authMiddleware(s.apiLogs))
 	mux.HandleFunc("/api/config", s.authMiddleware(s.apiConfig))
 	mux.HandleFunc("/api/sessions", s.authMiddleware(s.apiSessions))
+	mux.HandleFunc("/api/proxy-occupancy", s.authMiddleware(s.apiProxyOccupancy))
 	mux.HandleFunc("/api/proxy/delete", s.authMiddleware(s.apiDeleteProxy))
 	mux.HandleFunc("/api/proxy/toggle", s.authMiddleware(s.apiToggleProxy))
 	mux.HandleFunc("/api/proxy/refresh", s.authMiddleware(s.apiRefreshProxy))

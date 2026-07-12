@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"sort"
 	"strings"
+	"time"
 
 	"goproxy/affinity"
 	"goproxy/auth"
@@ -50,11 +51,15 @@ func Resolve(store Store, sessions *affinity.Store, route auth.ParsedUsername, e
 		return proxy, nil
 	}
 	maxSessions := maxSessionsPerProxy()
-	proxy, err := pickForSession(store, sessions, rebindRegion, route.Session, excludes, maxSessions)
+	cooldownMinutes := proxyCooldownMinutes()
+	proxy, err := pickForSession(store, sessions, rebindRegion, route.Session, excludes, maxSessions, cooldownMinutes)
 	if err != nil {
 		return nil, err
 	}
 	sessions.SetProxy(route.Session, proxy.ID, proxy.Address, proxy.Region)
+	if cooldownMinutes > 0 {
+		sessions.SetCooldown(proxy.ID, sessionsNow(sessions).Add(time.Duration(cooldownMinutes)*time.Minute))
+	}
 	return proxy, nil
 }
 
@@ -62,7 +67,8 @@ func Resolve(store Store, sessions *affinity.Store, route auth.ParsedUsername, e
 // 按 session 名哈希稳定地选择一个。同一 session 恒定映射同一节点（配合黏连），
 // 不同 session 分散到不同节点，同时把候选限制在最快的 K 个以保证出口质量。
 // maxSessions > 0 时过滤 occupancy >= max 的节点；0 表示不限制。
-func pickForSession(store Store, sessions *affinity.Store, region, session string, excludes []int64, maxSessions int) (*storage.Proxy, error) {
+// cooldownMinutes > 0 时过滤 InCooldown 节点；0 表示忽略冷却表（读侧关闭）。
+func pickForSession(store Store, sessions *affinity.Store, region, session string, excludes []int64, maxSessions, cooldownMinutes int) (*storage.Proxy, error) {
 	region = normalizeRegion(region)
 	proxies, err := store.GetByRegion(region, excludes)
 	if err != nil {
@@ -76,6 +82,13 @@ func pickForSession(store Store, sessions *affinity.Store, region, session strin
 		filtered := filterByOccupancy(available, sessions, maxSessions)
 		if len(filtered) == 0 {
 			return nil, noNodeCapacityError(region)
+		}
+		available = filtered
+	}
+	if cooldownMinutes > 0 && sessions != nil {
+		filtered := filterByCooldown(available, sessions)
+		if len(filtered) == 0 {
+			return nil, noNodeCooldownError(region)
 		}
 		available = filtered
 	}
@@ -98,6 +111,19 @@ func filterByOccupancy(proxies []storage.Proxy, sessions *affinity.Store, maxSes
 	return out
 }
 
+func filterByCooldown(proxies []storage.Proxy, sessions *affinity.Store) []storage.Proxy {
+	if sessions == nil {
+		return proxies
+	}
+	out := make([]storage.Proxy, 0, len(proxies))
+	for _, proxy := range proxies {
+		if !sessions.InCooldown(proxy.ID) {
+			out = append(out, proxy)
+		}
+	}
+	return out
+}
+
 func maxSessionsPerProxy() int {
 	cfg := config.Get()
 	if cfg == nil {
@@ -107,6 +133,26 @@ func maxSessionsPerProxy() int {
 		return 0
 	}
 	return cfg.MaxSessionsPerProxy
+}
+
+func proxyCooldownMinutes() int {
+	cfg := config.Get()
+	if cfg == nil {
+		return 0
+	}
+	if cfg.ProxyCooldownMinutes < 0 {
+		return 0
+	}
+	return cfg.ProxyCooldownMinutes
+}
+
+// sessionsNow returns the affinity store clock so cooldown_until aligns with
+// InCooldown under injectable test clocks.
+func sessionsNow(sessions *affinity.Store) time.Time {
+	if sessions == nil {
+		return time.Now()
+	}
+	return sessions.Now()
 }
 
 // topKByLatency 返回按延迟升序排列的前 k 个节点（不足 k 个则全返回）。
@@ -234,4 +280,11 @@ func noNodeCapacityError(region string) error {
 		return fmt.Errorf("%w (capacity)", ErrNoNode)
 	}
 	return fmt.Errorf("%w for region: %s (capacity)", ErrNoNode, region)
+}
+
+func noNodeCooldownError(region string) error {
+	if region == "" {
+		return fmt.Errorf("%w (cooldown)", ErrNoNode)
+	}
+	return fmt.Errorf("%w for region: %s (cooldown)", ErrNoNode, region)
 }

@@ -54,8 +54,12 @@ type Config struct {
 	SessionTTLMinutes      int
 	// MaxSessionsPerProxy limits concurrent sticky sessions per proxy node.
 	// 0 means unlimited (default, backward compatible). Values < 0 are rejected on Save.
-	MaxSessionsPerProxy    int
-	DefaultRegion          string
+	MaxSessionsPerProxy int
+	// ProxyCooldownMinutes is the quiet period after a new session first-bind
+	// during which other new sessions must not bind the same proxy.
+	// 0 disables cooldown (default). Values < 0 are rejected on Save.
+	ProxyCooldownMinutes int
+	DefaultRegion        string
 	BlockedCountries       []string
 	AllowedCountries       []string
 	DBPath                 string
@@ -107,9 +111,10 @@ func DefaultConfig() *Config {
 		WebUIPort:              envPort("WEBUI_PORT", ":7800"),
 		ProxyAuthEnabled:       true,
 		ProxyAuthUsername:      "acct",
-		SessionTTLMinutes:      envInt("SESSION_TTL_MINUTES", 10),
-		MaxSessionsPerProxy:    envIntNonNegative("MAX_SESSIONS_PER_PROXY", 0),
-		DefaultRegion:          NormalizeCountryCode(os.Getenv("DEFAULT_REGION")),
+		SessionTTLMinutes:    envInt("SESSION_TTL_MINUTES", 10),
+		MaxSessionsPerProxy:  envIntNonNegative("MAX_SESSIONS_PER_PROXY", 0),
+		ProxyCooldownMinutes: envIntNonNegative("PROXY_COOLDOWN_MINUTES", 0),
+		DefaultRegion:        NormalizeCountryCode(os.Getenv("DEFAULT_REGION")),
 		BlockedCountries:       envCountriesDefault("BLOCKED_COUNTRIES", []string{"CN"}),
 		AllowedCountries:       envCountries("ALLOWED_COUNTRIES"),
 		DBPath:                 dataDir() + "proxy.db",
@@ -192,10 +197,11 @@ type savedConfig struct {
 	ProxyAuthUsername     string   `json:"proxy_auth_username,omitempty"`
 	ProxyAuthPassword     string   `json:"proxy_auth_password,omitempty"`
 	ProxyAuthPasswordHash string   `json:"proxy_auth_password_hash,omitempty"`
-	SessionTTLMinutes     int      `json:"session_ttl_minutes,omitempty"`
-	// pointer so 0 (unlimited) can be distinguished from "field absent"
-	MaxSessionsPerProxy   *int     `json:"max_sessions_per_proxy,omitempty"`
-	DefaultRegion         string   `json:"default_region,omitempty"`
+	SessionTTLMinutes int `json:"session_ttl_minutes,omitempty"`
+	// pointer so 0 (unlimited / disabled) can be distinguished from "field absent"
+	MaxSessionsPerProxy  *int    `json:"max_sessions_per_proxy,omitempty"`
+	ProxyCooldownMinutes *int    `json:"proxy_cooldown_minutes,omitempty"`
+	DefaultRegion        string  `json:"default_region,omitempty"`
 	HealthIntervalMinutes int      `json:"health_check_interval,omitempty"`
 	MaxRetry              *int     `json:"max_retry,omitempty"`
 	SingBoxPath           string   `json:"singbox_path,omitempty"`
@@ -212,9 +218,13 @@ func saveConfig(cfg *Config, replace func(string, string) error) error {
 	if cfg.MaxSessionsPerProxy < 0 {
 		return fmt.Errorf("max_sessions_per_proxy must be >= 0, got %d", cfg.MaxSessionsPerProxy)
 	}
+	if cfg.ProxyCooldownMinutes < 0 {
+		return fmt.Errorf("proxy_cooldown_minutes must be >= 0, got %d", cfg.ProxyCooldownMinutes)
+	}
 	authEnabled := cfg.ProxyAuthEnabled
 	maxRetry := cfg.MaxRetry
 	maxSessions := cfg.MaxSessionsPerProxy
+	cooldown := cfg.ProxyCooldownMinutes
 	data, err := json.MarshalIndent(savedConfig{
 		HTTPPort:              cfg.HTTPPort,
 		SOCKS5Port:            cfg.SOCKS5Port,
@@ -226,6 +236,7 @@ func saveConfig(cfg *Config, replace func(string, string) error) error {
 		ProxyAuthPasswordHash: cfg.ProxyAuthPasswordHash,
 		SessionTTLMinutes:     cfg.SessionTTLMinutes,
 		MaxSessionsPerProxy:   &maxSessions,
+		ProxyCooldownMinutes:  &cooldown,
 		DefaultRegion:         NormalizeCountryCode(cfg.DefaultRegion),
 		HealthIntervalMinutes: cfg.HealthIntervalMinutes,
 		MaxRetry:              &maxRetry,
@@ -320,6 +331,13 @@ func applySavedConfig(cfg *Config, saved savedConfig) {
 			cfg.MaxSessionsPerProxy = 0
 		} else {
 			cfg.MaxSessionsPerProxy = *saved.MaxSessionsPerProxy
+		}
+	}
+	if saved.ProxyCooldownMinutes != nil {
+		if *saved.ProxyCooldownMinutes < 0 {
+			cfg.ProxyCooldownMinutes = 0
+		} else {
+			cfg.ProxyCooldownMinutes = *saved.ProxyCooldownMinutes
 		}
 	}
 	if saved.DefaultRegion != "" {

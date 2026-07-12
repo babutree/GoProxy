@@ -18,8 +18,11 @@ type Store struct {
 	// reverse maps proxy_id -> set of session_ids currently bound (non-expired).
 	// Kept in sync with bindings by SetProxy/Remove/Get-expiry/GC.
 	reverse map[int64]map[string]struct{}
-	ttl     time.Duration
-	now     func() time.Time
+	// cooldown maps proxy_id -> cooldown_until (exclusive end time).
+	// Written on new session first-bind; sticky hits do not consult this map.
+	cooldown map[int64]time.Time
+	ttl      time.Duration
+	now      func() time.Time
 
 	// GC lifecycle fields, guarded by mu.
 	gcStarted bool
@@ -45,6 +48,7 @@ func NewWithClock(ttl time.Duration, now func() time.Time) *Store {
 	return &Store{
 		bindings: map[string]Binding{},
 		reverse:  map[int64]map[string]struct{}{},
+		cooldown: map[int64]time.Time{},
 		ttl:      ttl,
 		now:      now,
 	}
@@ -87,6 +91,51 @@ func (s *Store) Remove(sessionID string) {
 	if binding, ok := s.bindings[sessionID]; ok {
 		s.removeBindingLocked(sessionID, binding)
 	}
+}
+
+// SetCooldown records that proxyID must not receive new session first-binds
+// until the given absolute time. Sticky sessions are unaffected. Callers that
+// want CD disabled should simply skip calling this method (or use config CD=0
+// on the selector read path).
+func (s *Store) SetCooldown(proxyID int64, until time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cooldown == nil {
+		s.cooldown = map[int64]time.Time{}
+	}
+	s.cooldown[proxyID] = until
+}
+
+// InCooldown reports whether proxyID is still within a recorded cooldown window
+// (now < until). Expired entries are pruned lazily.
+func (s *Store) InCooldown(proxyID int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	until, ok := s.cooldown[proxyID]
+	if !ok {
+		return false
+	}
+	if !s.now().Before(until) {
+		delete(s.cooldown, proxyID)
+		return false
+	}
+	return true
+}
+
+// CooldownRemaining returns time left until proxyID leaves cooldown, or 0.
+func (s *Store) CooldownRemaining(proxyID int64) time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	until, ok := s.cooldown[proxyID]
+	if !ok {
+		return 0
+	}
+	rem := until.Sub(s.now())
+	if rem <= 0 {
+		delete(s.cooldown, proxyID)
+		return 0
+	}
+	return rem
 }
 
 // CountByProxy returns the number of non-expired sessions currently bound to proxyID.
@@ -286,4 +335,11 @@ func (s *Store) RemainingTTL(binding SessionBinding) time.Duration {
 		return 0
 	}
 	return remaining
+}
+
+// Now returns the store's clock instant (injectable in tests).
+func (s *Store) Now() time.Time {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.now()
 }

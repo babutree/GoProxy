@@ -236,6 +236,8 @@ Subscription nodes are managed through subscription operations. Manual-node dele
 | `SOCKS5_PORT` | `7801` | SOCKS5 gateway listen port. |
 | `HTTP_PORT` | `7802` | HTTP gateway listen port. |
 | `SESSION_TTL_MINUTES` | `10` | Sticky session binding TTL. |
+| `MAX_SESSIONS_PER_PROXY` | `0` | Max concurrent sticky sessions per proxy (`0` = unlimited). |
+| `PROXY_COOLDOWN_MINUTES` | `0` | After a new session first-bind, other new sessions skip that node for N minutes (`0` = off). Sticky hits ignore cooldown. |
 | `DEFAULT_REGION` | empty | Optional default region for requests without `-region-`. |
 | `ALLOWED_COUNTRIES` | empty | Comma-separated allowlist; takes priority when set. |
 | `BLOCKED_COUNTRIES` | empty | Comma-separated denylist used only when allowlist is empty. |

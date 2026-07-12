@@ -32,6 +32,7 @@ func TestBusinessAPIsRequireAuthentication(t *testing.T) {
 		"/api/subscriptions",
 		"/api/custom/status",
 		"/api/sessions",
+		"/api/proxy-occupancy",
 		"/api/manual-node/add",
 		"/api/manual-node/region",
 		"/api/manual-node/note",
@@ -897,6 +898,105 @@ func TestSessionMonitorContainerOnlyInAuthenticatedDashboard(t *testing.T) {
 	}
 	if strings.Contains(loginHTML, "session-rows") || strings.Contains(loginHTMLWithError, "session-rows") {
 		t.Fatal("login HTML contains session monitor container")
+	}
+}
+
+// TestProxyOccupancyAPIRequiresAuthentication: 未登录访问 /api/proxy-occupancy 必须 401，且不泄漏业务字段。
+func TestProxyOccupancyAPIRequiresAuthentication(t *testing.T) {
+	server := newTestServer(t)
+	if err := server.storage.AddManualProxy("203.0.113.50:8080", "http", "us", ""); err != nil {
+		t.Fatalf("AddManualProxy() error = %v", err)
+	}
+	proxy, err := server.storage.GetProxyByAddress("203.0.113.50:8080")
+	if err != nil {
+		t.Fatalf("GetProxyByAddress() error = %v", err)
+	}
+	server.affinity.SetProxy("occ-unauth", proxy.ID, proxy.Address, "us")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/proxy-occupancy", nil)
+	rec := httptest.NewRecorder()
+	server.routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusUnauthorized, rec.Body.String())
+	}
+	assertNoBusinessTerms(t, rec.Body.String())
+}
+
+// TestProxyOccupancyAPIReturnsPerProxySessions: 已认证返回每节点 active_sessions / max_sessions；cooldown_remaining_seconds 非负；无 password 字段。
+func TestProxyOccupancyAPIReturnsPerProxySessions(t *testing.T) {
+	server := newTestServer(t)
+	server.cfg.MaxSessionsPerProxy = 1
+	if err := server.storage.AddManualProxy("203.0.113.51:8080", "http", "us", ""); err != nil {
+		t.Fatalf("AddManualProxy() error = %v", err)
+	}
+	if err := server.storage.AddManualProxy("203.0.113.52:8080", "http", "jp", ""); err != nil {
+		t.Fatalf("AddManualProxy() error = %v", err)
+	}
+	p1, err := server.storage.GetProxyByAddress("203.0.113.51:8080")
+	if err != nil {
+		t.Fatalf("GetProxyByAddress(p1) error = %v", err)
+	}
+	p2, err := server.storage.GetProxyByAddress("203.0.113.52:8080")
+	if err != nil {
+		t.Fatalf("GetProxyByAddress(p2) error = %v", err)
+	}
+	server.affinity.SetProxy("sess-a", p1.ID, p1.Address, "us")
+	server.affinity.SetProxy("sess-b", p1.ID, p1.Address, "us")
+	server.affinity.SetProxy("sess-c", p2.ID, p2.Address, "jp")
+
+	req := authenticatedJSONRequest(http.MethodGet, "/api/proxy-occupancy", "")
+	rec := httptest.NewRecorder()
+	server.routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, bad := range []string{`"password"`, `"proxy_auth_password"`, `"username"`, `"user"`, `"pass"`} {
+		if strings.Contains(body, bad) {
+			t.Fatalf("occupancy response must not contain credential field %s: %s", bad, body)
+		}
+	}
+
+	type occupancyRow struct {
+		ProxyID                  int64  `json:"proxy_id"`
+		Address                  string `json:"address"`
+		ActiveSessions           int    `json:"active_sessions"`
+		MaxSessions              int    `json:"max_sessions"`
+		CooldownRemainingSeconds int64  `json:"cooldown_remaining_seconds"`
+	}
+	var rows []occupancyRow
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatalf("decode occupancy response: %v; body=%s", err, body)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("len(rows) = %d, want 2: %#v", len(rows), rows)
+	}
+
+	byID := make(map[int64]occupancyRow, len(rows))
+	for _, row := range rows {
+		byID[row.ProxyID] = row
+	}
+	r1, ok := byID[p1.ID]
+	if !ok {
+		t.Fatalf("missing proxy_id=%d in %#v", p1.ID, rows)
+	}
+	if r1.Address != p1.Address || r1.ActiveSessions != 2 || r1.MaxSessions != 1 {
+		t.Fatalf("proxy1 row = %#v, want address=%q active=2 max=1", r1, p1.Address)
+	}
+	if r1.CooldownRemainingSeconds < 0 {
+		t.Fatalf("cooldown_remaining_seconds = %d, want >=0", r1.CooldownRemainingSeconds)
+	}
+	r2, ok := byID[p2.ID]
+	if !ok {
+		t.Fatalf("missing proxy_id=%d in %#v", p2.ID, rows)
+	}
+	if r2.Address != p2.Address || r2.ActiveSessions != 1 || r2.MaxSessions != 1 {
+		t.Fatalf("proxy2 row = %#v, want address=%q active=1 max=1", r2, p2.Address)
+	}
+	if r2.CooldownRemainingSeconds < 0 {
+		t.Fatalf("cooldown_remaining_seconds = %d, want >=0", r2.CooldownRemainingSeconds)
 	}
 }
 
