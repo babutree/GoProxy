@@ -9,6 +9,8 @@
 
 ### 新增
 
+- **会话占用上限**（可选）：max_sessions_per_proxy / MAX_SESSIONS_PER_PROXY，默认 0 不限制；>0 时新 session 绑定受每节点上限约束
+
 - **sing-box 分片多进程**
   - `ShardedSingBox` 将隧道节点按稳定哈希切到 N 个独立进程（默认 4，可配置）
   - 仅重载节点集变化的分片；真实进程级平滑重载与 6000 节点规模验证

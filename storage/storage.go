@@ -259,10 +259,8 @@ func (s *Storage) initSchema() error {
 		s.db.Exec(`ALTER TABLE subscriptions ADD COLUMN last_success DATETIME`)
 	}
 	// 迁移：订阅表添加 headers 字段（自定义请求头 JSON 字符串，向后兼容默认空）
-	var hasHeaders int
-	s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('subscriptions') WHERE name='headers'`).Scan(&hasHeaders)
-	if hasHeaders == 0 {
-		s.db.Exec(`ALTER TABLE subscriptions ADD COLUMN headers TEXT NOT NULL DEFAULT ''`)
+	if err := s.addSubscriptionColumnIfMissing("headers", `ALTER TABLE subscriptions ADD COLUMN headers TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
 	}
 	if err := s.migrateSubscriptionIdentity(); err != nil {
 		return err

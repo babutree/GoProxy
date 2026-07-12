@@ -10,6 +10,7 @@ import (
 
 	"goproxy/affinity"
 	"goproxy/auth"
+	"goproxy/config"
 	"goproxy/storage"
 )
 
@@ -48,7 +49,8 @@ func Resolve(store Store, sessions *affinity.Store, route auth.ParsedUsername, e
 	if proxy != nil {
 		return proxy, nil
 	}
-	proxy, err := pickForSession(store, rebindRegion, route.Session, excludes)
+	maxSessions := maxSessionsPerProxy()
+	proxy, err := pickForSession(store, sessions, rebindRegion, route.Session, excludes, maxSessions)
 	if err != nil {
 		return nil, err
 	}
@@ -59,7 +61,8 @@ func Resolve(store Store, sessions *affinity.Store, route auth.ParsedUsername, e
 // pickForSession 为一个 session 首次绑定选节点：在该地域延迟最低的前 K 个候选中，
 // 按 session 名哈希稳定地选择一个。同一 session 恒定映射同一节点（配合黏连），
 // 不同 session 分散到不同节点，同时把候选限制在最快的 K 个以保证出口质量。
-func pickForSession(store Store, region, session string, excludes []int64) (*storage.Proxy, error) {
+// maxSessions > 0 时过滤 occupancy >= max 的节点；0 表示不限制。
+func pickForSession(store Store, sessions *affinity.Store, region, session string, excludes []int64, maxSessions int) (*storage.Proxy, error) {
 	region = normalizeRegion(region)
 	proxies, err := store.GetByRegion(region, excludes)
 	if err != nil {
@@ -69,10 +72,41 @@ func pickForSession(store Store, region, session string, excludes []int64) (*sto
 	if len(available) == 0 {
 		return nil, noNodeError(region)
 	}
+	if maxSessions > 0 && sessions != nil {
+		filtered := filterByOccupancy(available, sessions, maxSessions)
+		if len(filtered) == 0 {
+			return nil, noNodeCapacityError(region)
+		}
+		available = filtered
+	}
 	candidates := topKByLatency(available, sessionSpreadTopK)
 	idx := hashString(session) % uint32(len(candidates))
 	picked := candidates[idx]
 	return &picked, nil
+}
+
+func filterByOccupancy(proxies []storage.Proxy, sessions *affinity.Store, maxSessions int) []storage.Proxy {
+	if maxSessions <= 0 || sessions == nil {
+		return proxies
+	}
+	out := make([]storage.Proxy, 0, len(proxies))
+	for _, proxy := range proxies {
+		if sessions.CountByProxy(proxy.ID) < maxSessions {
+			out = append(out, proxy)
+		}
+	}
+	return out
+}
+
+func maxSessionsPerProxy() int {
+	cfg := config.Get()
+	if cfg == nil {
+		return 0
+	}
+	if cfg.MaxSessionsPerProxy < 0 {
+		return 0
+	}
+	return cfg.MaxSessionsPerProxy
 }
 
 // topKByLatency 返回按延迟升序排列的前 k 个节点（不足 k 个则全返回）。
@@ -109,6 +143,8 @@ func resolveBoundProxy(store Store, sessions *affinity.Store, route auth.ParsedU
 	}
 	rebindRegion := requestedOrBoundRegion(route.Region, binding.Region)
 	if binding.ProxyID <= 0 || excluded(binding.ProxyID, excludes) || bindingRegionMismatch(binding, route.Region) {
+		// Release occupancy before first-bind / rebind so self does not consume quota.
+		sessions.Remove(route.Session)
 		return nil, rebindRegion
 	}
 	proxy, err := store.GetProxyByID(binding.ProxyID)
@@ -191,4 +227,11 @@ func noNodeError(region string) error {
 		return ErrNoNode
 	}
 	return fmt.Errorf("%w for region: %s", ErrNoNode, region)
+}
+
+func noNodeCapacityError(region string) error {
+	if region == "" {
+		return fmt.Errorf("%w (capacity)", ErrNoNode)
+	}
+	return fmt.Errorf("%w for region: %s (capacity)", ErrNoNode, region)
 }

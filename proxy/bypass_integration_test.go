@@ -1,8 +1,14 @@
 package proxy
 
 import (
+	"bufio"
+	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 )
@@ -45,6 +51,119 @@ func TestSocks5BypassDialsLocalTargetDirectly(t *testing.T) {
 	}
 	if string(got) != string(payload) {
 		t.Fatalf("echo = %q, want %q", got, payload)
+	}
+}
+
+// TestHTTPBypassDialsLocalTargetDirectly 空 store 时 HTTP 入站对 127.0.0.1 仍直连成功。
+// 无上游节点却能拿到本地目标响应，只能走 httpDirect bypass。
+func TestHTTPBypassDialsLocalTargetDirectly(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/bypass-ok" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("http-bypass-ok"))
+	}))
+	t.Cleanup(target.Close)
+
+	store := newProxyTestStore() // 空 store：无任何上游
+	gateway := newProxyTestServer(store, proxyTestConfig(0))
+	proxySrv := httptest.NewServer(gateway)
+	t.Cleanup(proxySrv.Close)
+
+	proxyURL, err := url.Parse(proxySrv.URL)
+	if err != nil {
+		t.Fatalf("parse proxy url: %v", err)
+	}
+	client := &http.Client{
+		Timeout: 3 * time.Second,
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(proxyURL),
+		},
+	}
+
+	resp, err := client.Get(target.URL + "/bypass-ok")
+	if err != nil {
+		t.Fatalf("HTTP via empty-store proxy to local target: %v (want bypass direct success)", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK || string(body) != "http-bypass-ok" {
+		t.Fatalf("status/body = %d %q, want 200 http-bypass-ok", resp.StatusCode, body)
+	}
+}
+
+// TestHTTPConnectBypassDialsLocalTargetDirectly 空 store 时 CONNECT 对 127.0.0.1 仍建立直连隧道。
+func TestHTTPConnectBypassDialsLocalTargetDirectly(t *testing.T) {
+	echoAddr, _ := startLocalEcho(t)
+
+	store := newProxyTestStore()
+	gateway := newProxyTestServer(store, proxyTestConfig(0))
+	proxySrv := httptest.NewServer(gateway)
+	t.Cleanup(proxySrv.Close)
+
+	proxyHost := strings.TrimPrefix(proxySrv.URL, "http://")
+	conn, err := net.DialTimeout("tcp", proxyHost, 3*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+
+	_, err = fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", echoAddr, echoAddr)
+	if err != nil {
+		t.Fatalf("write CONNECT: %v", err)
+	}
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})
+	if err != nil {
+		t.Fatalf("read CONNECT response: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("CONNECT status = %d, want 200 (bypass tunnel); echoAddr=%s", resp.StatusCode, echoAddr)
+	}
+
+	payload := []byte("connect-bypass")
+	if _, err := conn.Write(payload); err != nil {
+		t.Fatalf("write tunnel payload: %v", err)
+	}
+	got := make([]byte, len(payload))
+	if _, err := io.ReadFull(br, got); err != nil {
+		t.Fatalf("read tunnel echo: %v", err)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("tunnel echo = %q, want %q", got, payload)
+	}
+}
+
+// TestHTTPBypassFollowsRedirect 锁定 HTTP bypass 直连的重定向策略：
+// httpDirect 使用默认 http.Client（未设 CheckRedirect），会跟随 3xx 至最终响应。
+func TestHTTPBypassFollowsRedirect(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/final", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("redirect-final"))
+	})
+	mux.HandleFunc("/start", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/final", http.StatusFound)
+	})
+	target := httptest.NewServer(mux)
+	t.Cleanup(target.Close)
+
+	store := newProxyTestStore()
+	gateway := newProxyTestServer(store, proxyTestConfig(0))
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, target.URL+"/start", nil)
+	gateway.handleHTTP(rec, req, emptyRoute())
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("bypass redirect status = %d, want 200 (default client follows redirect)", rec.Code)
+	}
+	if body := rec.Body.String(); body != "redirect-final" {
+		t.Fatalf("bypass redirect body = %q, want redirect-final", body)
 	}
 }
 

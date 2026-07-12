@@ -122,3 +122,53 @@ func TestSubColumnsIncludesHeaders(t *testing.T) {
 		t.Fatal("subColumns constant missing headers")
 	}
 }
+
+// TestAddSubscriptionColumnIfMissingPropagatesCheckError 对齐 addProxyColumnIfMissing：
+// pragma 检查失败必须上抛，不可静默忽略。
+func TestAddSubscriptionColumnIfMissingPropagatesCheckError(t *testing.T) {
+	store := newTestStorage(t)
+	if err := store.db.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+	err := store.addSubscriptionColumnIfMissing("headers", `ALTER TABLE subscriptions ADD COLUMN headers TEXT NOT NULL DEFAULT ''`)
+	if err == nil {
+		t.Fatal("addSubscriptionColumnIfMissing() expected error on closed db, got nil")
+	}
+	if !strings.Contains(err.Error(), "check subscriptions.headers") {
+		t.Fatalf("error = %v, want wrap prefix check subscriptions.headers", err)
+	}
+}
+
+// TestAddSubscriptionColumnIfMissingPropagatesAlterError ALTER 失败必须上抛。
+// 删表后 pragma 计数为 0，随后 ALTER 因表不存在失败。
+func TestAddSubscriptionColumnIfMissingPropagatesAlterError(t *testing.T) {
+	store := newTestStorage(t)
+	if _, err := store.db.Exec(`DROP TABLE subscriptions`); err != nil {
+		t.Fatalf("drop subscriptions: %v", err)
+	}
+	err := store.addSubscriptionColumnIfMissing("headers", `ALTER TABLE subscriptions ADD COLUMN headers TEXT NOT NULL DEFAULT ''`)
+	if err == nil {
+		t.Fatal("addSubscriptionColumnIfMissing() expected alter error, got nil")
+	}
+	if !strings.Contains(err.Error(), "add subscriptions.headers") {
+		t.Fatalf("error = %v, want wrap prefix add subscriptions.headers", err)
+	}
+}
+
+// TestAddSubscriptionColumnIfMissingIdempotent 列已存在时跳过 ALTER 且不报错。
+func TestAddSubscriptionColumnIfMissingIdempotent(t *testing.T) {
+	store := newTestStorage(t)
+	if err := store.addSubscriptionColumnIfMissing("headers", `ALTER TABLE subscriptions ADD COLUMN headers TEXT NOT NULL DEFAULT ''`); err != nil {
+		t.Fatalf("first call (column exists) error = %v", err)
+	}
+	if err := store.addSubscriptionColumnIfMissing("headers", `ALTER TABLE subscriptions ADD COLUMN headers TEXT NOT NULL DEFAULT ''`); err != nil {
+		t.Fatalf("second call error = %v", err)
+	}
+	var count int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('subscriptions') WHERE name = 'headers'`).Scan(&count); err != nil {
+		t.Fatalf("count headers column: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("headers column count = %d, want 1", count)
+	}
+}

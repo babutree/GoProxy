@@ -15,8 +15,11 @@ type Binding struct {
 type Store struct {
 	mu       sync.RWMutex
 	bindings map[string]Binding
-	ttl      time.Duration
-	now      func() time.Time
+	// reverse maps proxy_id -> set of session_ids currently bound (non-expired).
+	// Kept in sync with bindings by SetProxy/Remove/Get-expiry/GC.
+	reverse map[int64]map[string]struct{}
+	ttl     time.Duration
+	now     func() time.Time
 
 	// GC lifecycle fields, guarded by mu.
 	gcStarted bool
@@ -39,7 +42,12 @@ func New(ttl time.Duration) *Store {
 }
 
 func NewWithClock(ttl time.Duration, now func() time.Time) *Store {
-	return &Store{bindings: map[string]Binding{}, ttl: ttl, now: now}
+	return &Store{
+		bindings: map[string]Binding{},
+		reverse:  map[int64]map[string]struct{}{},
+		ttl:      ttl,
+		now:      now,
+	}
 }
 
 func (s *Store) Get(sessionID string) (Binding, bool) {
@@ -51,7 +59,7 @@ func (s *Store) Get(sessionID string) (Binding, bool) {
 		return Binding{}, false
 	}
 	if s.expired(binding) {
-		delete(s.bindings, sessionID)
+		s.removeBindingLocked(sessionID, binding)
 		return Binding{}, false
 	}
 	binding.LastActive = s.now()
@@ -66,13 +74,75 @@ func (s *Store) Set(sessionID string, nodeAddress string, region string) {
 func (s *Store) SetProxy(sessionID string, proxyID int64, nodeAddress string, region string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if old, ok := s.bindings[sessionID]; ok {
+		s.detachReverseLocked(sessionID, old.ProxyID)
+	}
 	s.bindings[sessionID] = Binding{ProxyID: proxyID, NodeAddress: nodeAddress, Region: region, LastActive: s.now()}
+	s.attachReverseLocked(sessionID, proxyID)
 }
 
 func (s *Store) Remove(sessionID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if binding, ok := s.bindings[sessionID]; ok {
+		s.removeBindingLocked(sessionID, binding)
+	}
+}
+
+// CountByProxy returns the number of non-expired sessions currently bound to proxyID.
+// It purges any reverse-index entries whose forward binding is missing or expired.
+func (s *Store) CountByProxy(proxyID int64) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.countByProxyLocked(proxyID)
+}
+
+func (s *Store) countByProxyLocked(proxyID int64) int {
+	sessions, ok := s.reverse[proxyID]
+	if !ok || len(sessions) == 0 {
+		return 0
+	}
+	for sessionID := range sessions {
+		binding, ok := s.bindings[sessionID]
+		if !ok || binding.ProxyID != proxyID {
+			delete(sessions, sessionID)
+			continue
+		}
+		if s.expired(binding) {
+			s.removeBindingLocked(sessionID, binding)
+			continue
+		}
+	}
+	if len(sessions) == 0 {
+		delete(s.reverse, proxyID)
+		return 0
+	}
+	return len(sessions)
+}
+
+func (s *Store) attachReverseLocked(sessionID string, proxyID int64) {
+	set, ok := s.reverse[proxyID]
+	if !ok {
+		set = map[string]struct{}{}
+		s.reverse[proxyID] = set
+	}
+	set[sessionID] = struct{}{}
+}
+
+func (s *Store) detachReverseLocked(sessionID string, proxyID int64) {
+	set, ok := s.reverse[proxyID]
+	if !ok {
+		return
+	}
+	delete(set, sessionID)
+	if len(set) == 0 {
+		delete(s.reverse, proxyID)
+	}
+}
+
+func (s *Store) removeBindingLocked(sessionID string, binding Binding) {
 	delete(s.bindings, sessionID)
+	s.detachReverseLocked(sessionID, binding.ProxyID)
 }
 
 func (s *Store) expired(binding Binding) bool {
@@ -125,7 +195,7 @@ func (s *Store) collectExpired() {
 
 	for sessionID, binding := range s.bindings {
 		if s.expired(binding) {
-			delete(s.bindings, sessionID)
+			s.removeBindingLocked(sessionID, binding)
 		}
 	}
 }

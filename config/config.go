@@ -52,6 +52,9 @@ type Config struct {
 	ProxyAuthPassword      string
 	ProxyAuthPasswordHash  string
 	SessionTTLMinutes      int
+	// MaxSessionsPerProxy limits concurrent sticky sessions per proxy node.
+	// 0 means unlimited (default, backward compatible). Values < 0 are rejected on Save.
+	MaxSessionsPerProxy    int
 	DefaultRegion          string
 	BlockedCountries       []string
 	AllowedCountries       []string
@@ -105,6 +108,7 @@ func DefaultConfig() *Config {
 		ProxyAuthEnabled:       true,
 		ProxyAuthUsername:      "acct",
 		SessionTTLMinutes:      envInt("SESSION_TTL_MINUTES", 10),
+		MaxSessionsPerProxy:    envIntNonNegative("MAX_SESSIONS_PER_PROXY", 0),
 		DefaultRegion:          NormalizeCountryCode(os.Getenv("DEFAULT_REGION")),
 		BlockedCountries:       envCountriesDefault("BLOCKED_COUNTRIES", []string{"CN"}),
 		AllowedCountries:       envCountries("ALLOWED_COUNTRIES"),
@@ -189,6 +193,8 @@ type savedConfig struct {
 	ProxyAuthPassword     string   `json:"proxy_auth_password,omitempty"`
 	ProxyAuthPasswordHash string   `json:"proxy_auth_password_hash,omitempty"`
 	SessionTTLMinutes     int      `json:"session_ttl_minutes,omitempty"`
+	// pointer so 0 (unlimited) can be distinguished from "field absent"
+	MaxSessionsPerProxy   *int     `json:"max_sessions_per_proxy,omitempty"`
 	DefaultRegion         string   `json:"default_region,omitempty"`
 	HealthIntervalMinutes int      `json:"health_check_interval,omitempty"`
 	MaxRetry              *int     `json:"max_retry,omitempty"`
@@ -203,8 +209,12 @@ func Save(cfg *Config) error {
 }
 
 func saveConfig(cfg *Config, replace func(string, string) error) error {
+	if cfg.MaxSessionsPerProxy < 0 {
+		return fmt.Errorf("max_sessions_per_proxy must be >= 0, got %d", cfg.MaxSessionsPerProxy)
+	}
 	authEnabled := cfg.ProxyAuthEnabled
 	maxRetry := cfg.MaxRetry
+	maxSessions := cfg.MaxSessionsPerProxy
 	data, err := json.MarshalIndent(savedConfig{
 		HTTPPort:              cfg.HTTPPort,
 		SOCKS5Port:            cfg.SOCKS5Port,
@@ -215,6 +225,7 @@ func saveConfig(cfg *Config, replace func(string, string) error) error {
 		ProxyAuthPassword:     cfg.ProxyAuthPassword,
 		ProxyAuthPasswordHash: cfg.ProxyAuthPasswordHash,
 		SessionTTLMinutes:     cfg.SessionTTLMinutes,
+		MaxSessionsPerProxy:   &maxSessions,
 		DefaultRegion:         NormalizeCountryCode(cfg.DefaultRegion),
 		HealthIntervalMinutes: cfg.HealthIntervalMinutes,
 		MaxRetry:              &maxRetry,
@@ -303,6 +314,14 @@ func applySavedConfig(cfg *Config, saved savedConfig) {
 	if saved.SessionTTLMinutes > 0 {
 		cfg.SessionTTLMinutes = saved.SessionTTLMinutes
 	}
+	if saved.MaxSessionsPerProxy != nil {
+		if *saved.MaxSessionsPerProxy < 0 {
+			// corrupt config: keep default (unlimited) rather than panic
+			cfg.MaxSessionsPerProxy = 0
+		} else {
+			cfg.MaxSessionsPerProxy = *saved.MaxSessionsPerProxy
+		}
+	}
 	if saved.DefaultRegion != "" {
 		cfg.DefaultRegion = NormalizeCountryCode(saved.DefaultRegion)
 	}
@@ -355,6 +374,20 @@ func normalizePort(value string) string {
 func envInt(key string, defaultValue int) int {
 	value, err := strconv.Atoi(strings.TrimSpace(os.Getenv(key)))
 	if err != nil || value <= 0 {
+		return defaultValue
+	}
+	return value
+}
+
+// envIntNonNegative parses env as int allowing 0. Empty/unset/invalid → defaultValue.
+// Negative values are rejected and fall back to defaultValue.
+func envIntNonNegative(key string, defaultValue int) int {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return defaultValue
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 0 {
 		return defaultValue
 	}
 	return value

@@ -271,6 +271,23 @@ func (s *Storage) addProxyColumnIfMissing(name, alterSQL string) error {
 	return nil
 }
 
+// addSubscriptionColumnIfMissing 对齐 addProxyColumnIfMissing：检查/ALTER 失败均上抛。
+func (s *Storage) addSubscriptionColumnIfMissing(name, alterSQL string) error {
+	var exists int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('subscriptions') WHERE name = ?`, name).Scan(&exists)
+	if err != nil {
+		return fmt.Errorf("check subscriptions.%s column: %w", name, err)
+	}
+	if exists > 0 {
+		return nil
+	}
+	log.Printf("[storage] migrating: adding subscriptions.%s column", name)
+	if _, err := s.db.Exec(alterSQL); err != nil {
+		return fmt.Errorf("add subscriptions.%s column: %w", name, err)
+	}
+	return nil
+}
+
 func normalizeRegion(region string) string {
 	return strings.ToLower(strings.TrimSpace(region))
 }
