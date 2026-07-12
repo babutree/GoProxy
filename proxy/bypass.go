@@ -12,7 +12,7 @@ import (
 //   - 主机名 localhost（或其子域）、.local 后缀（mDNS）；
 //   - IPv4/IPv6 回环（127.0.0.0/8、::1）；
 //   - RFC1918 私网（10/8、172.16/12、192.168/16）与 IPv6 ULA（fc00::/7）；
-//   - link-local（169.254.0.0/16、fe80::/10）。
+//   - link-local（169.254.0.0/16、fe80::/10），但云 metadata 固定地址除外。
 //
 // 公网域名与公网 IP 一律返回 false，必须经上游节点。
 func isBypassTarget(target string) bool {
@@ -34,7 +34,14 @@ func isBypassTarget(target string) bool {
 		// 非 IP 字面量的域名：除上面的本地名外，一律经上游。
 		return false
 	}
+	if isCloudMetadataIP(ip) {
+		return false
+	}
 	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
+}
+
+func isCloudMetadataIP(ip net.IP) bool {
+	return ip.Equal(net.ParseIP("169.254.169.254"))
 }
 
 // hostOnly 从 "host" 或 "host:port" 中取出 host（去掉 IPv6 方括号）。

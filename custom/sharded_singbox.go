@@ -4,9 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"log"
 	"path/filepath"
 	"sort"
 	"sync"
+	"time"
 )
 
 // singBoxShard 是分片编排层依赖的最小 sing-box 能力接口。
@@ -31,8 +33,11 @@ var _ singBoxShard = (*SingBoxProcess)(nil)
 //
 // 本组件只做编排，不直接启动进程；分片行为完全委托给注入的 singBoxShard 实现。
 type ShardedSingBox struct {
-	mu     sync.Mutex
-	shards []singBoxShard
+	mu       sync.Mutex
+	shards   []singBoxShard
+	stopCh   chan struct{}
+	stopOnce sync.Once
+	stopping bool
 	// assignedKeys 记录每个分片"当前已成功加载"的节点 key 集合。
 	// 仅在 shard.Reload 成功后更新，Reload 失败时保持不变，以便下次重载对该分片重试。
 	assignedKeys []map[string]bool
@@ -51,7 +56,10 @@ func NewShardedSingBox(binPath, dataDir string, basePort, shardCount int) *Shard
 		shardDir := filepath.Join(dataDir, fmt.Sprintf("shard-%d", shardIndex))
 		return NewSingBoxProcess(binPath, shardDir, shardBasePort)
 	}
-	return newShardedSingBoxWithFactory(basePort, shardCount, factory)
+	sb := newShardedSingBoxWithFactory(basePort, shardCount, factory)
+	sb.stopCh = make(chan struct{})
+	go sb.watchShards()
+	return sb
 }
 
 // newShardedSingBoxWithFactory 是测试专用构造器：注入自定义分片工厂（如 spy）。
@@ -133,8 +141,9 @@ func (sb *ShardedSingBox) Reload(nodes []ParsedNode) error {
 		for _, n := range target[i] {
 			newKeys[n.NodeKey()] = true
 		}
-		// 核心平滑性质：key 集未变化的分片完全跳过，不触发 shard.Reload。
-		if keySetsEqual(newKeys, sb.assignedKeys[i]) {
+		// 核心平滑性质：key 集未变化且分片仍健康时跳过；若进程已退出/失败，
+		// 即使 key 集不变也必须重载，否则崩溃分片会被永久跳过。
+		if keySetsEqual(newKeys, sb.assignedKeys[i]) && !shardNeedsReloadForRuntime(target[i], sb.shards[i]) {
 			continue
 		}
 		if err := sb.shards[i].Reload(target[i]); err != nil {
@@ -149,6 +158,58 @@ func (sb *ShardedSingBox) Reload(nodes []ParsedNode) error {
 		return errors.Join(errs...)
 	}
 	return nil
+}
+
+// shardNeedsReloadForRuntime 判断 key 集未变化时是否仍需因运行态异常而强制重载。
+// 仅对目标非空的分片生效；空分片由 key 集变化路径负责停止/清理。
+func shardNeedsReloadForRuntime(target []ParsedNode, shard singBoxShard) bool {
+	if len(target) == 0 {
+		return false
+	}
+	rs := shard.GetRuntimeStatus()
+	switch rs.Status {
+	case SingBoxStatusFailed, SingBoxStatusStopped:
+		return true
+	}
+	return false
+}
+
+const shardHealthCheckInterval = 5 * time.Second
+
+func (sb *ShardedSingBox) watchShards() {
+	ticker := time.NewTicker(shardHealthCheckInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			if err := sb.recoverFailedShards(); err != nil {
+				log.Printf("[custom] sing-box 分片恢复失败: %v", err)
+			}
+		case <-sb.stopCh:
+			return
+		}
+	}
+}
+
+// recoverFailedShards 恢复进程异常退出的分片，不重载健康分片。
+func (sb *ShardedSingBox) recoverFailedShards() error {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	if sb.stopping {
+		return nil
+	}
+
+	var errs []error
+	for i, shard := range sb.shards {
+		if len(sb.assignedKeys[i]) == 0 || !shardNeedsReloadForRuntime(shard.GetNodes(), shard) {
+			continue
+		}
+		nodes := shard.GetNodes()
+		if err := shard.Reload(nodes); err != nil {
+			errs = append(errs, fmt.Errorf("shard %d: %w", i, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // sortNodesByKey 按 NodeKey 对节点做稳定排序，保证分片内节点顺序确定，
@@ -219,6 +280,13 @@ func (sb *ShardedSingBox) GetLocalAddress(nodeKey string) string {
 func (sb *ShardedSingBox) Stop() {
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
+	if sb.stopping {
+		return
+	}
+	sb.stopping = true
+	if sb.stopCh != nil {
+		sb.stopOnce.Do(func() { close(sb.stopCh) })
+	}
 	for _, shard := range sb.shards {
 		shard.Stop()
 	}

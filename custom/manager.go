@@ -1,12 +1,14 @@
 package custom
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"sync"
@@ -439,9 +441,31 @@ func (m *Manager) fetchSubscriptionData(sub *storage.Subscription) ([]byte, erro
 // 向后兼容：先设默认 User-Agent: v2rayN，再逐个应用自定义头——自定义头覆盖默认，
 // 未指定 User-Agent 时保留默认 v2rayN，不破坏现有订阅拉取。
 func (m *Manager) fetchSubscriptionURL(urlStr, headersJSON string) ([]byte, error) {
-	transport := &http.Transport{}
+	if err := validateSubscriptionURLTarget(urlStr); err != nil {
+		return nil, err
+	}
+	transport := &http.Transport{DialContext: safeSubscriptionDialContext}
 
 	client := &http.Client{Timeout: 30 * time.Second, Transport: transport}
+	req, err := buildSubscriptionRequest(urlStr, headersJSON)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("直接拉取订阅 URL 失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("直接拉取订阅 URL 返回 HTTP %d", resp.StatusCode)
+	}
+
+	return io.ReadAll(resp.Body)
+}
+
+func buildSubscriptionRequest(urlStr, headersJSON string) (*http.Request, error) {
 	req, err := http.NewRequest("GET", urlStr, nil)
 	if err != nil {
 		return nil, err
@@ -462,18 +486,90 @@ func (m *Manager) fetchSubscriptionURL(urlStr, headersJSON string) ([]byte, erro
 			log.Printf("[custom] ⚠️ 订阅自定义请求头解析失败，回退默认 UA: %v", err)
 		}
 	}
+	return req, nil
+}
 
-	resp, err := client.Do(req)
+func validateSubscriptionURLTarget(urlStr string) error {
+	u, err := url.Parse(urlStr)
 	if err != nil {
-		return nil, fmt.Errorf("直接拉取订阅 URL 失败: %w", err)
+		return err
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("直接拉取订阅 URL 返回 HTTP %d", resp.StatusCode)
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("unsafe subscription URL: unsupported scheme %q", u.Scheme)
 	}
+	if u.Hostname() == "" {
+		return fmt.Errorf("unsafe subscription URL: missing host")
+	}
+	return validateSubscriptionHost(u.Hostname())
+}
 
-	return io.ReadAll(resp.Body)
+func safeSubscriptionDialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, fmt.Errorf("unsafe subscription URL: invalid dial address %q", address)
+	}
+	if err := validateSubscriptionHost(host); err != nil {
+		return nil, err
+	}
+	ips, err := lookupSubscriptionHost(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	var firstErr error
+	dialer := &net.Dialer{}
+	for _, ip := range ips {
+		if isUnsafeSubscriptionIP(ip) {
+			return nil, fmt.Errorf("unsafe subscription URL: resolved private target %s", ip.String())
+		}
+		conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+		if err == nil {
+			return conn, nil
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	return nil, fmt.Errorf("unsafe subscription URL: no address for host %q", host)
+}
+
+func validateSubscriptionHost(host string) error {
+	if ip := net.ParseIP(host); ip != nil {
+		if isUnsafeSubscriptionIP(ip) {
+			return fmt.Errorf("unsafe subscription URL: private target %s", ip.String())
+		}
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ips, err := lookupSubscriptionHost(ctx, host)
+	if err != nil {
+		return err
+	}
+	for _, ip := range ips {
+		if isUnsafeSubscriptionIP(ip) {
+			return fmt.Errorf("unsafe subscription URL: resolved private target %s", ip.String())
+		}
+	}
+	return nil
+}
+
+func lookupSubscriptionHost(ctx context.Context, host string) ([]net.IP, error) {
+	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	ips := make([]net.IP, 0, len(addrs))
+	for _, addr := range addrs {
+		ips = append(ips, addr.IP)
+	}
+	return ips, nil
+}
+
+func isUnsafeSubscriptionIP(ip net.IP) bool {
+	return !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
 }
 
 // validateCustomProxies 验证订阅代理，返回可用数

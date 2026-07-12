@@ -244,6 +244,98 @@ func TestReloadSkipsUnchangedShards(t *testing.T) {
 	}
 }
 
+// TestReloadRetriesUnchangedFailedShard 覆盖崩溃分片恢复：即使节点 key 集未变化，
+// 只要分片运行态已经失败，也必须再次 Reload，不能因 assignedKeys 相等而永久跳过。
+func TestReloadRetriesUnchangedFailedShard(t *testing.T) {
+	const n = 4
+	sb, spies := newSpyOrchestrator(10000, n)
+	node := tunnelNode("will-crash", "will-crash.example.com", "pw")
+	idx := shardIndexForKey(node.NodeKey(), n)
+
+	if err := sb.Reload([]ParsedNode{node}); err != nil {
+		t.Fatalf("首次 Reload 出错: %v", err)
+	}
+	before := spies[idx].calls()
+	spies[idx].status = SingBoxRuntimeStatus{
+		Running:    false,
+		Status:     SingBoxStatusFailed,
+		Reason:     "process_exited",
+		Nodes:      1,
+		ReadyPorts: 0,
+		TotalPorts: 1,
+	}
+
+	if err := sb.Reload([]ParsedNode{node}); err != nil {
+		t.Fatalf("崩溃后 Reload 出错: %v", err)
+	}
+	if got := spies[idx].calls(); got != before+1 {
+		t.Fatalf("崩溃分片 key 集未变也必须重载，Reload 次数=%d，期望 %d", got, before+1)
+	}
+
+	for i, s := range spies {
+		if i == idx {
+			continue
+		}
+		if got := s.calls(); got != 0 {
+			t.Fatalf("未受影响分片 %d 不应被 Reload，得到 %d", i, got)
+		}
+	}
+}
+
+// TestRecoverFailedShardsRestartsOnlyFailedShard 验证健康检查无需等待订阅变化，
+// 可直接恢复已崩溃分片，同时不触碰仍健康的分片。
+func TestRecoverFailedShardsRestartsOnlyFailedShard(t *testing.T) {
+	const n = 4
+	sb, spies := newSpyOrchestrator(10000, n)
+	nodes := nodesOnDistinctShards(t, n, 2)
+	if err := sb.Reload(nodes); err != nil {
+		t.Fatalf("首次 Reload 出错: %v", err)
+	}
+
+	failedIdx := shardIndexForKey(nodes[0].NodeKey(), n)
+	before := make([]int, len(spies))
+	for i, shard := range spies {
+		before[i] = shard.calls()
+	}
+	spies[failedIdx].status = SingBoxRuntimeStatus{
+		Running: false,
+		Status:  SingBoxStatusStopped,
+		Reason:  "process_exited",
+		Nodes:   1,
+	}
+
+	if err := sb.recoverFailedShards(); err != nil {
+		t.Fatalf("recoverFailedShards() error = %v", err)
+	}
+	for i, shard := range spies {
+		want := before[i]
+		if i == failedIdx {
+			want++
+		}
+		if got := shard.calls(); got != want {
+			t.Fatalf("分片 %d Reload 次数=%d，期望 %d", i, got, want)
+		}
+	}
+}
+
+func TestRecoverFailedShardsDoesNothingAfterStop(t *testing.T) {
+	sb, spies := newSpyOrchestrator(10000, 1)
+	node := tunnelNode("stopped", "stopped.example.com", "pw")
+	if err := sb.Reload([]ParsedNode{node}); err != nil {
+		t.Fatalf("首次 Reload 出错: %v", err)
+	}
+	before := spies[0].calls()
+	spies[0].status = SingBoxRuntimeStatus{Status: SingBoxStatusStopped, Nodes: 1}
+
+	sb.Stop()
+	if err := sb.recoverFailedShards(); err != nil {
+		t.Fatalf("停止后 recoverFailedShards() error = %v", err)
+	}
+	if got := spies[0].calls(); got != before {
+		t.Fatalf("停止后分片被复活，Reload 次数=%d，期望 %d", got, before)
+	}
+}
+
 // TestReloadTargetsOnlyChangedShard 验证新增一个节点只重载其所属分片。
 func TestReloadTargetsOnlyChangedShard(t *testing.T) {
 	const n = 4
