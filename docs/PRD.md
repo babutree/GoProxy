@@ -93,7 +93,7 @@
 - 若该国家**无任何可用节点**, 直接返回失败:
   - HTTP: `503 Service Unavailable`, body 说明 `no available node for region: <码>`。
   - SOCKS5: 回复 `0x01` (general failure)。
-- **不做静默降级到其他地域** (符合 AGENTS.md "禁止静默 fallback" 原则)。
+- **不做静默降级到其他地域**（禁止静默 fallback）。
 - 不带 region 时, 从全部可用节点选取。
 
 **节点地域来源** (见【决策点 5b】):

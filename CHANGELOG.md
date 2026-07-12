@@ -5,6 +5,47 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 版本号遵循 [语义化版本 2.0.0](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 新增
+
+- **sing-box 分片多进程**
+  - `ShardedSingBox` 将隧道节点按稳定哈希切到 N 个独立进程（默认 4，可配置）
+  - 仅重载节点集变化的分片；真实进程级平滑重载与 6000 节点规模验证
+  - 双入站收敛为单 `mixed` 端口（每节点 1 端口同时服务 SOCKS5+HTTP）
+  - 分片崩溃/停止后的主动恢复，以及停止后禁止 Reload 复活
+
+- **节点与风险展示**
+  - 节点星标、Cloudflare 拦截列、一键复制代理凭据
+  - 出口 IP 风险分双源展示；AI 服务可达性探测（OpenAI/Claude/Grok/Gemini）与前端徽章
+  - `dual_protocol` 显式标记 mixed 节点；协议双标签；复制完整代理 URL
+  - 全球节点分布地图（轮廓 + 会话弧线 + 网关定位）
+
+- **订阅与接入**
+  - 订阅自定义请求头（含 User-Agent），用于对默认 UA 返回 401 的订阅源
+  - 内网/本地目标直连 bypass（HTTP / CONNECT / SOCKS5）
+  - 代理密码可持久化并经已认证 config API 下发，支持前端拼完整 URL
+
+### 修复
+
+- sing-box 重启时端口 bind 竞态（等待旧监听释放后再启动）
+- 端口高水位泄漏与分片端口段超限保护
+- 分片崩溃后因 assignedKeys 跳过导致永不恢复
+- 订阅 URL SSRF 防护（拒绝私网/link-local/非全局单播目标）
+- 云 metadata 固定地址不再走代理直连 bypass
+- SOCKS5 帧过读、非法 RSV、上下游握手/入站协议超时与长连接 deadline 清除
+- HTTP 入站 `ReadHeaderTimeout`，降低半请求头挂死风险
+- 批量代理写入事务回滚；同址多身份歧义更新拒绝
+- 配置临时文件发布；畸形配置拒绝静默覆盖
+- WebUI：尾随 JSON 拒绝、413 一致、登出 CSRF/POST、订阅上传唯一文件与失败清理
+- 配置国家过滤失败时运行态/全局/磁盘一致性回滚
+- 健康检查重叠执行互斥；日志截断释放底层缓冲
+- AI 403 记为不可达；session TTL 边界；selector 绑定稳定性
+
+### 变更
+
+- 仓库不再跟踪本地专用说明与内部计划类文件（仅保留项目必需文档）
+
 ## [v0.4.1] - 2026-04-04
 
 ### 修复
