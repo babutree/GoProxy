@@ -2,8 +2,10 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -127,6 +129,54 @@ func TestSaveKeepsWebUIPasswordHashOnly(t *testing.T) {
 	}
 }
 
+func TestSaveRestrictsConfigFilePermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows os.FileMode does not expose NTFS owner-only ACLs")
+	}
+	clearConfigEnv(t)
+	t.Setenv("DATA_DIR", t.TempDir())
+	cfg := Load()
+	cfg.ProxyAuthPassword = "plain-proxy-secret"
+	cfg.ProxyAuthPasswordHash = passwordHash(cfg.ProxyAuthPassword)
+
+	if err := Save(cfg); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	info, err := os.Stat(ConfigFile())
+	if err != nil {
+		t.Fatalf("stat config: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0600 {
+		t.Fatalf("config permissions = %04o, want 0600", got)
+	}
+}
+
+func TestLoadRejectsMalformedConfigWithoutOverwritingIt(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("DATA_DIR", t.TempDir())
+	want := []byte(`{"proxy_auth_username":`)
+	if err := os.WriteFile(ConfigFile(), want, 0600); err != nil {
+		t.Fatalf("write malformed config: %v", err)
+	}
+
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("Load() accepted malformed config")
+			}
+		}()
+		Load()
+	}()
+
+	got, err := os.ReadFile(ConfigFile())
+	if err != nil {
+		t.Fatalf("read malformed config: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("malformed config was overwritten: got %q, want %q", got, want)
+	}
+}
+
 func TestSaveFailureDoesNotPolluteGlobalConfig(t *testing.T) {
 	clearConfigEnv(t)
 	t.Setenv("DATA_DIR", t.TempDir())
@@ -150,6 +200,52 @@ func TestSaveFailureDoesNotPolluteGlobalConfig(t *testing.T) {
 	}
 	if got := Get(); got.ProxyAuthUsername != "old" || got.SessionTTLMinutes != oldCfg.SessionTTLMinutes {
 		t.Fatalf("global config after failed Save = user:%q ttl:%d, want old/%d", got.ProxyAuthUsername, got.SessionTTLMinutes, oldCfg.SessionTTLMinutes)
+	}
+}
+
+func TestSaveReplaceFailurePreservesExistingConfig(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("DATA_DIR", t.TempDir())
+	oldCfg := Load()
+	oldCfg.ProxyAuthUsername = "old-user"
+	if err := Save(oldCfg); err != nil {
+		t.Fatalf("Save(old) error = %v", err)
+	}
+	want, err := os.ReadFile(ConfigFile())
+	if err != nil {
+		t.Fatalf("read old config: %v", err)
+	}
+
+	newCfg := *oldCfg
+	newCfg.ProxyAuthUsername = "new-user"
+	replaceErr := errors.New("forced atomic replace failure")
+	err = saveConfig(&newCfg, func(tempPath, targetPath string) error {
+		data, readErr := os.ReadFile(tempPath)
+		if readErr != nil {
+			t.Fatalf("read completed temp config: %v", readErr)
+		}
+		var parsed savedConfig
+		if unmarshalErr := json.Unmarshal(data, &parsed); unmarshalErr != nil {
+			t.Fatalf("temp config is incomplete: %v", unmarshalErr)
+		}
+		if targetPath != ConfigFile() {
+			t.Fatalf("replace target = %q, want %q", targetPath, ConfigFile())
+		}
+		return replaceErr
+	})
+	if !errors.Is(err, replaceErr) {
+		t.Fatalf("saveConfig() error = %v, want %v", err, replaceErr)
+	}
+
+	got, err := os.ReadFile(ConfigFile())
+	if err != nil {
+		t.Fatalf("read config after replace failure: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("existing config changed after replace failure")
+	}
+	if gotCfg := Get(); gotCfg.ProxyAuthUsername != "old-user" {
+		t.Fatalf("global config username = %q, want old-user", gotCfg.ProxyAuthUsername)
 	}
 }
 

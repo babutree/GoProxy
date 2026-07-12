@@ -19,6 +19,17 @@ func TestStoreExpiresBindings(t *testing.T) {
 	}
 }
 
+func TestStoreExpiresBindingExactlyAtTTL(t *testing.T) {
+	now := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
+	store := NewWithClock(10*time.Minute, func() time.Time { return now })
+	store.Set("s1", "us-fast:8080", "us")
+
+	now = now.Add(10 * time.Minute)
+	if _, ok := store.Get("s1"); ok {
+		t.Fatal("Get() returned binding exactly at TTL boundary")
+	}
+}
+
 func TestStoreRefreshesBindingOnGet(t *testing.T) {
 	now := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
 	store := NewWithClock(10*time.Minute, func() time.Time { return now })

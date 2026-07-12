@@ -2,7 +2,6 @@ package webui
 
 import (
 	"database/sql"
-	"encoding/json"
 	"log"
 	"net/http"
 
@@ -86,7 +85,11 @@ func (s *Server) apiDeleteProxy(w http.ResponseWriter, r *http.Request) {
 		ID      int64  `json:"id"`
 		Address string `json:"address"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || (req.ID <= 0 && req.Address == "") {
+	if err := decodeJSON(r, &req); err != nil {
+		jsonDecodeError(w, err)
+		return
+	}
+	if req.ID <= 0 && req.Address == "" {
 		jsonError(w, "invalid request", http.StatusBadRequest)
 		return
 	}
@@ -119,7 +122,11 @@ func (s *Server) apiToggleProxy(w http.ResponseWriter, r *http.Request) {
 		Address string `json:"address"`
 		Enable  bool   `json:"enable"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || (req.ID <= 0 && req.Address == "") {
+	if err := decodeJSON(r, &req); err != nil {
+		jsonDecodeError(w, err)
+		return
+	}
+	if req.ID <= 0 && req.Address == "" {
 		jsonError(w, "invalid request", http.StatusBadRequest)
 		return
 	}
@@ -153,7 +160,11 @@ func (s *Server) apiStarProxy(w http.ResponseWriter, r *http.Request) {
 		Address string `json:"address"`
 		Starred bool   `json:"starred"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || (req.ID <= 0 && req.Address == "") {
+	if err := decodeJSON(r, &req); err != nil {
+		jsonDecodeError(w, err)
+		return
+	}
+	if req.ID <= 0 && req.Address == "" {
 		jsonError(w, "invalid request", http.StatusBadRequest)
 		return
 	}
@@ -183,7 +194,11 @@ func (s *Server) apiRefreshProxy(w http.ResponseWriter, r *http.Request) {
 		ID      int64  `json:"id"`
 		Address string `json:"address"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || (req.ID <= 0 && req.Address == "") {
+	if err := decodeJSON(r, &req); err != nil {
+		jsonDecodeError(w, err)
+		return
+	}
+	if req.ID <= 0 && req.Address == "" {
 		jsonError(w, "invalid request", http.StatusBadRequest)
 		return
 	}

@@ -427,6 +427,12 @@ func (s *Server) dialViaProxy(p *storage.Proxy, host string) (net.Conn, error) {
 		if err != nil {
 			return nil, err
 		}
+		if timeout > 0 {
+			if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
+				conn.Close()
+				return nil, err
+			}
+		}
 		// 发送 CONNECT 请求给上游 HTTP 代理
 		fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", host, host)
 		reader := bufio.NewReader(conn)
@@ -439,6 +445,10 @@ func (s *Server) dialViaProxy(p *storage.Proxy, host string) (net.Conn, error) {
 		if resp.StatusCode != http.StatusOK {
 			conn.Close()
 			return nil, fmt.Errorf("upstream proxy connect failed: %s", resp.Status)
+		}
+		if err := conn.SetDeadline(time.Time{}); err != nil {
+			conn.Close()
+			return nil, err
 		}
 		return &bufferedConn{Conn: conn, reader: reader}, nil
 	case "socks5":

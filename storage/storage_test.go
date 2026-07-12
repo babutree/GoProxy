@@ -190,6 +190,42 @@ func TestManualAndSubscriptionSameAddressDoNotOverwriteIdentity(t *testing.T) {
 	}
 }
 
+func TestAddressManualEditsRejectAmbiguousProxyIdentity(t *testing.T) {
+	store := newTestStorage(t)
+	subID, err := store.AddSubscription("sub", "https://example.test/manual-edit.yaml", "", "auto", 60, "")
+	if err != nil {
+		t.Fatalf("AddSubscription() error = %v", err)
+	}
+	if err := store.AddManualProxy("ambiguous-edit:8080", "http", "jp", "manual-note"); err != nil {
+		t.Fatalf("AddManualProxy() error = %v", err)
+	}
+	if err := store.AddProxyWithSource("ambiguous-edit:8080", "http", SourceSubscription, subID); err != nil {
+		t.Fatalf("AddProxyWithSource() error = %v", err)
+	}
+
+	if err := store.UpdateProxyRegion("ambiguous-edit:8080", "US", true); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("UpdateProxyRegion() error = %v, want ambiguous identity error", err)
+	}
+	if err := store.UpdateProxyNote("ambiguous-edit:8080", "leaked-note"); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("UpdateProxyNote() error = %v, want ambiguous identity error", err)
+	}
+
+	manual, err := store.GetProxyByIdentity("ambiguous-edit:8080", SourceManual, 0)
+	if err != nil {
+		t.Fatalf("GetProxyByIdentity(manual) error = %v", err)
+	}
+	sub, err := store.GetProxyByIdentity("ambiguous-edit:8080", SourceSubscription, subID)
+	if err != nil {
+		t.Fatalf("GetProxyByIdentity(subscription) error = %v", err)
+	}
+	if manual.Region != "jp" || manual.Note != "manual-note" {
+		t.Fatalf("manual proxy was modified despite ambiguity: %#v", manual)
+	}
+	if sub.Region != "" || sub.Note != "" {
+		t.Fatalf("subscription proxy was modified despite ambiguity: %#v", sub)
+	}
+}
+
 func TestLegacyAddressUniqueMigrationAllowsManualAndSubscriptionSameAddress(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "proxy.db")
 	seedLegacyDB(t, dbPath)
@@ -598,6 +634,31 @@ func TestAddManualProxiesRollsBackOnPartialFailure(t *testing.T) {
 	}
 	if _, err := store.GetProxyByAddress("manual-good:1080"); err == nil {
 		t.Fatal("manual-good was committed despite later insert failure")
+	}
+}
+
+func TestAddProxiesRollsBackOnPartialFailure(t *testing.T) {
+	store := newTestStorage(t)
+	_, err := store.db.Exec(`
+		CREATE TRIGGER fail_bad_proxy
+		BEFORE INSERT ON proxies
+		WHEN NEW.address = 'batch-bad:8080'
+		BEGIN
+			SELECT RAISE(ABORT, 'forced batch insert failure');
+		END`)
+	if err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+
+	err = store.AddProxies([]Proxy{
+		{Address: "batch-good:1080", Protocol: "socks5"},
+		{Address: "batch-bad:8080", Protocol: "http"},
+	})
+	if err == nil {
+		t.Fatal("AddProxies() expected error, got nil")
+	}
+	if _, err := store.GetProxyByAddress("batch-good:1080"); err == nil {
+		t.Fatal("batch-good was committed despite later insert failure")
 	}
 }
 

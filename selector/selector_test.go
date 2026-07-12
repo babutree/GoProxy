@@ -14,6 +14,14 @@ type fakeStore struct {
 	proxies []storage.Proxy
 }
 
+type nilBoundProxyStore struct {
+	fakeStore
+}
+
+func (s nilBoundProxyStore) GetProxyByID(int64) (*storage.Proxy, error) {
+	return nil, nil
+}
+
 func (s fakeStore) GetByRegion(region string, excludes []int64) ([]storage.Proxy, error) {
 	excluded := map[int64]bool{}
 	for _, id := range excludes {
@@ -150,5 +158,38 @@ func TestResolveDifferentSessionsSpread(t *testing.T) {
 	}
 	if len(seen) < 2 {
 		t.Fatalf("sessions did not spread across nodes, only saw: %v", seen)
+	}
+}
+
+func TestResolveRebindsWhenStoreReturnsNilProxyWithoutError(t *testing.T) {
+	store := nilBoundProxyStore{fakeStore{proxies: []storage.Proxy{
+		{ID: 2, Address: "us-new:8080", Region: "us", Latency: 20, Status: "active"},
+	}}}
+	sessions := affinity.NewWithClock(10*time.Minute, time.Now)
+	sessions.SetProxy("abc", 1, "us-old:8080", "us")
+
+	proxy, err := Resolve(store, sessions, auth.ParsedUsername{Region: "us", Session: "abc"}, nil)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if proxy.ID != 2 {
+		t.Fatalf("Resolve() proxy ID = %d, want rebound ID 2", proxy.ID)
+	}
+}
+
+func TestPickForSessionStableForSharedAddressAcrossInputOrder(t *testing.T) {
+	first := storage.Proxy{ID: 10, Address: "shared:8080", Region: "us", Latency: 10, Status: "active"}
+	second := storage.Proxy{ID: 20, Address: "shared:8080", Region: "us", Latency: 10, Status: "active"}
+
+	pickedA, err := pickForSession(fakeStore{proxies: []storage.Proxy{first, second}}, "us", "stable", nil)
+	if err != nil {
+		t.Fatalf("first pickForSession() error = %v", err)
+	}
+	pickedB, err := pickForSession(fakeStore{proxies: []storage.Proxy{second, first}}, "us", "stable", nil)
+	if err != nil {
+		t.Fatalf("second pickForSession() error = %v", err)
+	}
+	if pickedA.ID != pickedB.ID {
+		t.Fatalf("same session/shared address picked IDs %d and %d after input reorder", pickedA.ID, pickedB.ID)
 	}
 }

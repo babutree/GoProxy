@@ -44,6 +44,9 @@ func (s *Storage) AddManualProxies(proxies []Proxy, region, note string) error {
 }
 
 func (s *Storage) UpdateProxyRegion(address, region string, manual bool) error {
+	if err := s.requireUnambiguousAddress(address); err != nil {
+		return err
+	}
 	regionSource := "auto"
 	if manual {
 		regionSource = "manual"
@@ -74,6 +77,9 @@ func (s *Storage) UpdateProxyRegionByID(id int64, region string, manual bool) er
 }
 
 func (s *Storage) UpdateProxyNote(address, note string) error {
+	if err := s.requireUnambiguousAddress(address); err != nil {
+		return err
+	}
 	res, err := s.db.Exec(`UPDATE proxies SET note = ? WHERE address = ?`, note, address)
 	if err != nil {
 		return err

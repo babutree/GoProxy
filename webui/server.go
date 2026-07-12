@@ -6,7 +6,9 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -222,7 +224,7 @@ func (s *Server) routes() *http.ServeMux {
 
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/login", s.handleLogin)
-	mux.HandleFunc("/logout", s.handleLogout)
+	mux.HandleFunc("/logout", s.authMiddleware(s.handleLogout))
 
 	// Public API: only authentication state, with no business data.
 	mux.HandleFunc("/api/auth/check", s.apiAuthCheck)
@@ -352,6 +354,15 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxLoginBody)
+	if err := r.ParseForm(); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			jsonError(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		jsonError(w, "invalid request", http.StatusBadRequest)
+		return
+	}
 	password := r.FormValue("password")
 	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(password)))
 	if hash != s.cfg.WebUIPasswordHash {
@@ -367,6 +378,14 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !validCSRF(r) {
+		jsonError(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	if cookie, err := r.Cookie("session"); err == nil {
 		sessionsMu.Lock()
 		delete(sessions, cookie.Value)
@@ -374,6 +393,28 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	}
 	http.SetCookie(w, clearSessionCookie(r))
 	http.Redirect(w, r, "/login", http.StatusFound)
+}
+
+func decodeJSON(r *http.Request, dst interface{}) error {
+	dec := json.NewDecoder(r.Body)
+	if err := dec.Decode(dst); err != nil {
+		return err
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		return errTrailingJSONValue
+	}
+	return nil
+}
+
+var errTrailingJSONValue = errors.New("trailing JSON value")
+
+func jsonDecodeError(w http.ResponseWriter, err error) {
+	var maxBytesErr *http.MaxBytesError
+	if errors.As(err, &maxBytesErr) {
+		jsonError(w, "request body too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+	jsonError(w, "invalid request", http.StatusBadRequest)
 }
 
 func jsonOK(w http.ResponseWriter, data interface{}) {

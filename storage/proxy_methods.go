@@ -32,11 +32,11 @@ func (s *Storage) AddProxies(proxies []Proxy) error {
 	if err != nil {
 		return err
 	}
+	defer tx.Rollback()
 	stmt, err := tx.Prepare(`INSERT INTO proxies (address, protocol, source, subscription_id, region_source)
 		VALUES (?, ?, 'manual', 0, 'auto')
 		ON CONFLICT(address, source, subscription_id) DO NOTHING`)
 	if err != nil {
-		tx.Rollback()
 		return err
 	}
 	defer stmt.Close()
@@ -44,6 +44,7 @@ func (s *Storage) AddProxies(proxies []Proxy) error {
 	for _, p := range proxies {
 		if _, err := stmt.Exec(p.Address, p.Protocol); err != nil {
 			log.Printf("insert proxy %s error: %v", p.Address, err)
+			return err
 		}
 	}
 	return tx.Commit()

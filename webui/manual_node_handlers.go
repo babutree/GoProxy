@@ -1,7 +1,6 @@
 package webui
 
 import (
-	"encoding/json"
 	"log"
 	"net/http"
 
@@ -18,7 +17,11 @@ func (s *Server) apiManualNodeAdd(w http.ResponseWriter, r *http.Request) {
 		Region string `json:"region"`
 		Note   string `json:"note"`
 	}
-	if err := decodeJSON(r, &req); err != nil || req.Link == "" {
+	if err := decodeJSON(r, &req); err != nil {
+		jsonDecodeError(w, err)
+		return
+	}
+	if req.Link == "" {
 		jsonError(w, "invalid request", http.StatusBadRequest)
 		return
 	}
@@ -93,7 +96,7 @@ func (s *Server) requireManualNodeRequest(w http.ResponseWriter, r *http.Request
 		return nil, false
 	}
 	if err := decodeJSON(r, dst); err != nil {
-		jsonError(w, "invalid request", http.StatusBadRequest)
+		jsonDecodeError(w, err)
 		return nil, false
 	}
 	var proxy *storage.Proxy
@@ -116,8 +119,4 @@ func (s *Server) requireManualNodeRequest(w http.ResponseWriter, r *http.Request
 		return nil, false
 	}
 	return proxy, true
-}
-
-func decodeJSON(r *http.Request, dst interface{}) error {
-	return json.NewDecoder(r.Body).Decode(dst)
 }

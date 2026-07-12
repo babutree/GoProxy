@@ -157,8 +157,7 @@ func (s *SOCKS5Server) socks5Handshake(conn net.Conn) (auth.ParsedUsername, erro
 	buf := make([]byte, 257)
 
 	// 读取客户端问候: [VER(1), NMETHODS(1), METHODS(1-255)]
-	n, err := io.ReadAtLeast(conn, buf, 2)
-	if err != nil {
+	if _, err := io.ReadFull(conn, buf[:2]); err != nil {
 		return auth.ParsedUsername{}, err
 	}
 
@@ -168,10 +167,8 @@ func (s *SOCKS5Server) socks5Handshake(conn net.Conn) (auth.ParsedUsername, erro
 	}
 
 	nmethods := int(buf[1])
-	if n < 2+nmethods {
-		if _, err := io.ReadFull(conn, buf[n:2+nmethods]); err != nil {
-			return auth.ParsedUsername{}, err
-		}
+	if _, err := io.ReadFull(conn, buf[2:2+nmethods]); err != nil {
+		return auth.ParsedUsername{}, err
 	}
 
 	// 检查是否需要认证
@@ -220,8 +217,7 @@ func (s *SOCKS5Server) socks5Auth(conn net.Conn) (auth.ParsedUsername, error) {
 	buf := make([]byte, 513)
 
 	// 读取认证请求: [VER(1), ULEN(1), UNAME(1-255), PLEN(1), PASSWD(1-255)]
-	n, err := io.ReadAtLeast(conn, buf, 2)
-	if err != nil {
+	if _, err := io.ReadFull(conn, buf[:2]); err != nil {
 		return auth.ParsedUsername{}, err
 	}
 
@@ -230,11 +226,8 @@ func (s *SOCKS5Server) socks5Auth(conn net.Conn) (auth.ParsedUsername, error) {
 	}
 
 	ulen := int(buf[1])
-	if n < 2+ulen {
-		if _, err := io.ReadFull(conn, buf[n:2+ulen]); err != nil {
-			return auth.ParsedUsername{}, err
-		}
-		n = 2 + ulen
+	if _, err := io.ReadFull(conn, buf[2:2+ulen]); err != nil {
+		return auth.ParsedUsername{}, err
 	}
 
 	parsed, err := auth.ParseUsername(string(buf[2 : 2+ulen]))
@@ -244,18 +237,13 @@ func (s *SOCKS5Server) socks5Auth(conn net.Conn) (auth.ParsedUsername, error) {
 	}
 
 	// 读取密码长度和密码
-	if n < 2+ulen+1 {
-		if _, err := io.ReadFull(conn, buf[n:2+ulen+1]); err != nil {
-			return auth.ParsedUsername{}, err
-		}
-		n = 2 + ulen + 1
+	if _, err := io.ReadFull(conn, buf[2+ulen:2+ulen+1]); err != nil {
+		return auth.ParsedUsername{}, err
 	}
 
 	plen := int(buf[2+ulen])
-	if n < 2+ulen+1+plen {
-		if _, err := io.ReadFull(conn, buf[n:2+ulen+1+plen]); err != nil {
-			return auth.ParsedUsername{}, err
-		}
+	if _, err := io.ReadFull(conn, buf[2+ulen+1:2+ulen+1+plen]); err != nil {
+		return auth.ParsedUsername{}, err
 	}
 
 	password := string(buf[2+ulen+1 : 2+ulen+1+plen])
@@ -291,6 +279,10 @@ func (s *SOCKS5Server) readSOCKS5Request(conn net.Conn) (string, error) {
 	if cmd != 0x01 { // 只支持 CONNECT
 		s.sendSOCKS5Reply(conn, 0x07) // Command not supported
 		return "", fmt.Errorf("unsupported command: %d", cmd)
+	}
+	if header[2] != 0x00 {
+		s.sendSOCKS5Reply(conn, 0x01) // General failure
+		return "", fmt.Errorf("invalid reserved byte: %d", header[2])
 	}
 
 	atyp := header[3]
@@ -371,10 +363,20 @@ func (s *SOCKS5Server) dialViaProxy(p *storage.Proxy, target string) (net.Conn, 
 		if err != nil {
 			return nil, err
 		}
+		if timeout > 0 {
+			if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
+				conn.Close()
+				return nil, err
+			}
+		}
 		// 发送 CONNECT 请求
 		fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
 		proxiedConn, err := readHTTPConnectResponse(conn)
 		if err != nil {
+			conn.Close()
+			return nil, err
+		}
+		if err := conn.SetDeadline(time.Time{}); err != nil {
 			conn.Close()
 			return nil, err
 		}
@@ -386,6 +388,12 @@ func (s *SOCKS5Server) dialViaProxy(p *storage.Proxy, target string) (net.Conn, 
 		proxyConn, err := dialer.Dial("tcp", p.Address)
 		if err != nil {
 			return nil, err
+		}
+		if timeout > 0 {
+			if err := proxyConn.SetDeadline(time.Now().Add(timeout)); err != nil {
+				proxyConn.Close()
+				return nil, err
+			}
 		}
 
 		// SOCKS5 握手（无认证）
@@ -447,6 +455,10 @@ func (s *SOCKS5Server) dialViaProxy(p *storage.Proxy, target string) (net.Conn, 
 
 		// 读取响应
 		if err := readSOCKS5ConnectReply(proxyConn); err != nil {
+			proxyConn.Close()
+			return nil, err
+		}
+		if err := proxyConn.SetDeadline(time.Time{}); err != nil {
 			proxyConn.Close()
 			return nil, err
 		}

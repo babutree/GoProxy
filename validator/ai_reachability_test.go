@@ -9,7 +9,7 @@ import (
 )
 
 // TestProbeAIReachability 覆盖 AI 可达性探测：真实 http 往返（httptest server，不 mock）。
-// 语义：拿到任何 HTTP 响应（含 401）→ 0（可达）；连接失败/超时 → 1（不可达）。
+// 语义：拿到非 403 HTTP 响应（含 401）→ 0（可达）；403 或连接失败/超时 → 1（不可达）。
 // 通过覆盖包级 aiProbeTargets 变量，把 4 个探测目标指向本地 httptest server，
 // 其中：一个返回 401（缺 key，仍算可达=0）、一个返回 200（可达=0）、一个已关闭（连不通=1）。
 func TestProbeAIReachability(t *testing.T) {
@@ -52,6 +52,25 @@ func TestProbeAIReachability(t *testing.T) {
 	}
 	if len(m) != 4 {
 		t.Fatalf("probeAIReachability() keys = %d, want 4 (full=%q)", len(m), got)
+	}
+}
+
+func TestProbeOneAIRejectsForbiddenButAcceptsUnauthorized(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/forbidden" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	client := &http.Client{Timeout: time.Second}
+	if got := probeOneAI(client, server.URL+"/unauthorized"); got != 0 {
+		t.Fatalf("probeOneAI(401) = %d, want reachable (0)", got)
+	}
+	if got := probeOneAI(client, server.URL+"/forbidden"); got != 1 {
+		t.Fatalf("probeOneAI(403) = %d, want unavailable (1)", got)
 	}
 }
 

@@ -1,20 +1,39 @@
 package webui
 
 import (
-	"encoding/json"
-	"errors"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
-	"time"
 
 	"goproxy/config"
 	"goproxy/storage"
 )
 
 const maxSubscriptionFileContentBytes = 1 << 20
+
+type subscriptionFile interface {
+	Name() string
+	Chmod(os.FileMode) error
+	WriteString(string) (int, error)
+	Close() error
+}
+
+func writeSubscriptionFile(file subscriptionFile, content string) error {
+	var operationErr error
+	if err := file.Chmod(0644); err != nil {
+		operationErr = err
+	} else if _, err := file.WriteString(content); err != nil {
+		operationErr = err
+	}
+	if err := file.Close(); operationErr == nil {
+		operationErr = err
+	}
+	if operationErr != nil {
+		_ = os.Remove(file.Name())
+	}
+	return operationErr
+}
 
 // apiSubscriptions 获取订阅列表（含每个订阅的可用/不可用代理数）
 func (s *Server) apiSubscriptions(w http.ResponseWriter, r *http.Request) {
@@ -89,13 +108,8 @@ func (s *Server) apiSubscriptionAdd(w http.ResponseWriter, r *http.Request) {
 		RefreshMin  int    `json:"refresh_min"`
 		Headers     string `json:"headers"` // 自定义请求头 JSON 对象字符串，如 {"User-Agent":"clash.meta"}；空则用默认 UA。
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		var maxBytesErr *http.MaxBytesError
-		if errors.As(err, &maxBytesErr) {
-			jsonError(w, "request body too large", http.StatusRequestEntityTooLarge)
-			return
-		}
-		jsonError(w, "invalid request", http.StatusBadRequest)
+	if err := decodeJSON(r, &req); err != nil {
+		jsonDecodeError(w, err)
 		return
 	}
 	if len(req.FileContent) > maxSubscriptionFileContentBytes {
@@ -122,8 +136,14 @@ func (s *Server) apiSubscriptionAdd(w http.ResponseWriter, r *http.Request) {
 		}
 		subDir := filepath.Join(dataDir, "subscriptions")
 		os.MkdirAll(subDir, 0755)
-		filePath = filepath.Join(subDir, fmt.Sprintf("sub_%d.yaml", time.Now().UnixMilli()))
-		if err := os.WriteFile(filePath, []byte(req.FileContent), 0644); err != nil {
+		file, err := os.CreateTemp(subDir, "sub_*.yaml")
+		if err != nil {
+			log.Printf("[webui] create subscription file failed: %v", err)
+			jsonError(w, "failed to save subscription file", http.StatusInternalServerError)
+			return
+		}
+		filePath = file.Name()
+		if err := writeSubscriptionFile(file, req.FileContent); err != nil {
 			log.Printf("[webui] save subscription file failed: %v", err)
 			jsonError(w, "failed to save subscription file", http.StatusInternalServerError)
 			return
@@ -148,6 +168,9 @@ func (s *Server) apiSubscriptionAdd(w http.ResponseWriter, r *http.Request) {
 
 	id, err := s.storage.AddSubscription(req.Name, req.URL, filePath, "auto", req.RefreshMin, req.Headers)
 	if err != nil {
+		if filePath != "" {
+			_ = os.Remove(filePath)
+		}
 		log.Printf("[webui] add subscription failed: %v", err)
 		jsonError(w, "failed to add subscription", http.StatusInternalServerError)
 		return
@@ -175,7 +198,11 @@ func (s *Server) apiSubscriptionDelete(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ID int64 `json:"id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ID <= 0 {
+	if err := decodeJSON(r, &req); err != nil {
+		jsonDecodeError(w, err)
+		return
+	}
+	if req.ID <= 0 {
 		jsonError(w, "invalid request", http.StatusBadRequest)
 		return
 	}
@@ -212,7 +239,11 @@ func (s *Server) apiSubscriptionRefresh(w http.ResponseWriter, r *http.Request) 
 	var req struct {
 		ID int64 `json:"id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ID <= 0 {
+	if err := decodeJSON(r, &req); err != nil {
+		jsonDecodeError(w, err)
+		return
+	}
+	if req.ID <= 0 {
 		jsonError(w, "invalid request", http.StatusBadRequest)
 		return
 	}
@@ -251,7 +282,11 @@ func (s *Server) apiSubscriptionToggle(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ID int64 `json:"id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ID <= 0 {
+	if err := decodeJSON(r, &req); err != nil {
+		jsonDecodeError(w, err)
+		return
+	}
+	if req.ID <= 0 {
 		jsonError(w, "invalid request", http.StatusBadRequest)
 		return
 	}

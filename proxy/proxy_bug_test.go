@@ -451,6 +451,185 @@ func TestSocks5MaxRetryZeroAttemptsOnceAndDoesNotDisable(t *testing.T) {
 	}
 }
 
+func TestSOCKS5HandshakePreservesPipelinedRequest(t *testing.T) {
+	server := NewSOCKS5(nil, proxyTestConfig(0), ":0")
+	client, serverConn := net.Pipe()
+	defer client.Close()
+	defer serverConn.Close()
+
+	done := make(chan requestResult, 1)
+	go func() {
+		_, err := server.socks5Handshake(serverConn)
+		if err != nil {
+			done <- requestResult{err: err}
+			return
+		}
+		target, err := server.readSOCKS5Request(serverConn)
+		done <- requestResult{target: target, err: err}
+	}()
+
+	request := []byte{0x05, 0x01, 0x00, 0x03, 0x0b}
+	request = append(request, []byte("example.com")...)
+	request = append(request, 0x01, 0xbb)
+	pipelined := append([]byte{0x05, 0x01, 0x00}, request...)
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := client.Write(pipelined)
+		writeDone <- err
+	}()
+
+	methodReply := make([]byte, 2)
+	if err := readFullDeadline(t, client, methodReply); err != nil {
+		t.Fatalf("read method reply: %v", err)
+	}
+	if methodReply[0] != 0x05 || methodReply[1] != 0x00 {
+		t.Fatalf("method reply = %#v, want [0x05 0x00]", methodReply)
+	}
+	select {
+	case result := <-done:
+		if result.err != nil || result.target != "example.com:443" {
+			t.Fatalf("pipelined request = %q, %v; want example.com:443, nil", result.target, result.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("pipelined SOCKS5 request was consumed by handshake")
+	}
+	if err := <-writeDone; err != nil {
+		t.Fatalf("write pipelined greeting and request: %v", err)
+	}
+}
+
+func TestSOCKS5AuthPreservesBytesAfterAuthFrame(t *testing.T) {
+	cfg := proxyTestConfig(0)
+	cfg.ProxyAuthEnabled = true
+	server := NewSOCKS5(nil, cfg, ":0")
+	client, serverConn := net.Pipe()
+	defer client.Close()
+	defer serverConn.Close()
+
+	authDone := make(chan error, 1)
+	go func() {
+		_, err := server.socks5Auth(serverConn)
+		authDone <- err
+	}()
+	authFrame := []byte{0x01, 0x05}
+	authFrame = append(authFrame, []byte("proxy")...)
+	authFrame = append(authFrame, 0x06)
+	authFrame = append(authFrame, []byte("secret")...)
+	pipelined := append(authFrame, []byte("NEXT")...)
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := client.Write(pipelined)
+		writeDone <- err
+	}()
+
+	authReply := make([]byte, 2)
+	if err := readFullDeadline(t, client, authReply); err != nil {
+		t.Fatalf("read auth reply: %v", err)
+	}
+	if authReply[0] != 0x01 || authReply[1] != 0x00 {
+		t.Fatalf("auth reply = %#v, want [0x01 0x00]", authReply)
+	}
+	if err := <-authDone; err != nil {
+		t.Fatalf("socks5Auth() error = %v", err)
+	}
+	remaining := make([]byte, 4)
+	_ = serverConn.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := io.ReadFull(serverConn, remaining); err != nil {
+		t.Fatalf("read bytes after auth frame: %v (auth parser consumed pipelined bytes)", err)
+	}
+	if string(remaining) != "NEXT" {
+		t.Fatalf("bytes after auth frame = %q, want NEXT", remaining)
+	}
+	if err := <-writeDone; err != nil {
+		t.Fatalf("write pipelined auth frame: %v", err)
+	}
+}
+
+func TestReadSOCKS5RequestRejectsNonZeroReservedByte(t *testing.T) {
+	server := NewSOCKS5(nil, proxyTestConfig(0), ":0")
+	request := []byte{0x05, 0x01, 0x01, 0x01, 127, 0, 0, 1, 0x00, 0x50}
+	if target, err := server.readSOCKS5Request(&bufferConn{Reader: bytes.NewReader(request)}); err == nil {
+		t.Fatalf("readSOCKS5Request() accepted non-zero RSV with target %q", target)
+	}
+}
+
+func TestHTTPConnectDialTimesOutWhenUpstreamDoesNotRespond(t *testing.T) {
+	upstream := startSilentTCPServer(t)
+	server := New(nil, proxyTestConfig(1), ":0")
+
+	done := make(chan error, 1)
+	go func() {
+		conn, err := server.dialViaProxy(&storage.Proxy{Address: upstream, Protocol: "http"}, "target.test:443")
+		if conn != nil {
+			conn.Close()
+		}
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("dialViaProxy() succeeded against silent HTTP proxy, want timeout error")
+		}
+	case <-time.After(1500 * time.Millisecond):
+		t.Fatal("dialViaProxy() did not time out while waiting for HTTP CONNECT response")
+	}
+}
+
+func TestSocks5UpstreamDialTimesOutWhenHandshakeDoesNotRespond(t *testing.T) {
+	upstream := startSilentTCPServer(t)
+	server := NewSOCKS5(nil, proxyTestConfig(1), ":0")
+
+	done := make(chan error, 1)
+	go func() {
+		conn, err := server.dialViaProxy(&storage.Proxy{Address: upstream, Protocol: "socks5"}, "target.test:443")
+		if conn != nil {
+			conn.Close()
+		}
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("dialViaProxy() succeeded against silent SOCKS5 proxy, want timeout error")
+		}
+	case <-time.After(1500 * time.Millisecond):
+		t.Fatal("dialViaProxy() did not time out while waiting for SOCKS5 handshake")
+	}
+}
+
+func TestHTTPConnectDialWithZeroTimeoutDoesNotExpireImmediately(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		reader := bufio.NewReader(conn)
+		if _, err := http.ReadRequest(reader); err != nil {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+		_, _ = io.WriteString(conn, "HTTP/1.1 200 Connection Established\r\n\r\n")
+		time.Sleep(50 * time.Millisecond)
+	}()
+
+	cfg := proxyTestConfig(0)
+	cfg.ValidateTimeout = 0
+	server := New(nil, cfg, ":0")
+	conn, err := server.dialViaProxy(&storage.Proxy{Address: listener.Addr().String(), Protocol: "http"}, "target.test:443")
+	if err != nil {
+		t.Fatalf("dialViaProxy() with zero timeout error = %v, want no immediate deadline", err)
+	}
+	conn.Close()
+}
+
 // countingReader 产生指定字节数的零填充数据，并记录被实际读取的字节数，
 // 用于验证超限 body 不会被整体读入内存（BUG-54）。
 type countingReader struct {
@@ -485,6 +664,18 @@ type requestResult struct {
 	target string
 	err    error
 }
+
+type bufferConn struct {
+	io.Reader
+}
+
+func (c *bufferConn) Write(p []byte) (int, error)      { return len(p), nil }
+func (c *bufferConn) Close() error                     { return nil }
+func (c *bufferConn) LocalAddr() net.Addr              { return nil }
+func (c *bufferConn) RemoteAddr() net.Addr             { return nil }
+func (c *bufferConn) SetDeadline(time.Time) error      { return nil }
+func (c *bufferConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *bufferConn) SetWriteDeadline(time.Time) error { return nil }
 
 type socks5AuthResult struct {
 	parsedBase    string
@@ -724,4 +915,30 @@ func startFakeSocks5Upstream(t *testing.T) (string, <-chan []byte) {
 		time.Sleep(50 * time.Millisecond)
 	}()
 	return listener.Addr().String(), reqCh
+}
+
+func startSilentTCPServer(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	var conns sync.Map
+	t.Cleanup(func() {
+		_ = listener.Close()
+		conns.Range(func(key, _ any) bool {
+			_ = key.(net.Conn).Close()
+			return true
+		})
+	})
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			conns.Store(conn, struct{}{})
+		}
+	}()
+	return listener.Addr().String()
 }

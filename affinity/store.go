@@ -76,7 +76,7 @@ func (s *Store) Remove(sessionID string) {
 }
 
 func (s *Store) expired(binding Binding) bool {
-	return s.ttl > 0 && s.now().Sub(binding.LastActive) > s.ttl
+	return s.ttl > 0 && s.now().Sub(binding.LastActive) >= s.ttl
 }
 
 // StartGC starts a background goroutine that scans bindings every interval and

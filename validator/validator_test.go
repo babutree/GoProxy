@@ -1,11 +1,56 @@
 package validator
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"goproxy/config"
+	"goproxy/storage"
 )
+
+func TestNewClampsNonPositiveConcurrency(t *testing.T) {
+	for _, concurrency := range []int{0, -1} {
+		v := New(concurrency, 1, "http://127.0.0.1/validate")
+		if v.concurrency != 1 {
+			t.Fatalf("New(%d).concurrency = %d, want 1", concurrency, v.concurrency)
+		}
+	}
+}
+
+func TestValidateAllWithClampedConcurrencyReturnsForInvalidProxy(t *testing.T) {
+	v := New(0, 1, "http://127.0.0.1/validate")
+	done := make(chan []Result, 1)
+
+	go func() {
+		done <- v.ValidateAll([]storage.Proxy{{ID: 1, Address: "127.0.0.1:1", Protocol: "unknown"}})
+	}()
+
+	select {
+	case results := <-done:
+		if len(results) != 1 || results[0].Valid {
+			t.Fatalf("ValidateAll() = %#v, want one invalid result", results)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ValidateAll() did not return with clamped concurrency")
+	}
+}
+
+func TestGetExitIPInfoRejectsNon2xx(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`{"status":"success","query":"203.0.113.9","countryCode":"US","city":"Ashburn"}`))
+	}))
+	defer server.Close()
+
+	client := server.Client()
+	client.Transport = rewriteIPAPITransport{base: client.Transport, target: server.URL}
+	if got := getExitIPInfo(client); got.OK {
+		t.Fatalf("getExitIPInfo() = %#v for HTTP 502, want failed lookup", got)
+	}
+}
 
 func TestDefaultValidationTargetsAvoidHttpbinSinglePoint(t *testing.T) {
 	for _, target := range httpsTestTargets {

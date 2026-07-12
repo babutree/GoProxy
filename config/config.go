@@ -5,7 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -128,9 +130,10 @@ func Load() *Config {
 	data, err := os.ReadFile(ConfigFile())
 	if err == nil {
 		var saved savedConfig
-		if json.Unmarshal(data, &saved) == nil {
-			applySavedConfig(cfg, saved)
+		if err := json.Unmarshal(data, &saved); err != nil {
+			panic(fmt.Sprintf("load config: parse %s: %v", ConfigFile(), err))
 		}
+		applySavedConfig(cfg, saved)
 	}
 
 	// 首次启动引导：config.json 尚无凭据时，生成随机凭据并落盘。
@@ -196,6 +199,10 @@ type savedConfig struct {
 }
 
 func Save(cfg *Config) error {
+	return saveConfig(cfg, os.Rename)
+}
+
+func saveConfig(cfg *Config, replace func(string, string) error) error {
 	authEnabled := cfg.ProxyAuthEnabled
 	maxRetry := cfg.MaxRetry
 	data, err := json.MarshalIndent(savedConfig{
@@ -219,7 +226,33 @@ func Save(cfg *Config) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(ConfigFile(), data, 0644); err != nil {
+	targetPath := ConfigFile()
+	tempFile, err := os.CreateTemp(filepath.Dir(targetPath), ".config-*.tmp")
+	if err != nil {
+		return err
+	}
+	tempPath := tempFile.Name()
+	defer os.Remove(tempPath)
+	if err := tempFile.Chmod(0600); err != nil {
+		tempFile.Close()
+		return err
+	}
+	written, err := tempFile.Write(data)
+	if err == nil && written != len(data) {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
+		tempFile.Close()
+		return err
+	}
+	if err := tempFile.Sync(); err != nil {
+		tempFile.Close()
+		return err
+	}
+	if err := tempFile.Close(); err != nil {
+		return err
+	}
+	if err := replace(tempPath, targetPath); err != nil {
 		return err
 	}
 

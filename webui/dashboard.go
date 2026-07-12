@@ -176,7 +176,7 @@ tbody tr:hover{background:var(--soft)}
       <button class="btn" id="theme-toggle" onclick="toggleTheme()">🌙 深色</button>
       <button class="btn" onclick="refreshAll()">刷新</button>
       <button class="btn" onclick="runAsync('打开设置失败',openSettings)">系统设置</button>
-      <a class="btn danger" href="/logout">退出</a>
+      <button class="btn danger" onclick="logout()">退出</button>
     </div>
   </div>
   <nav class="tabs">
@@ -320,6 +320,7 @@ function safe(value){return value===undefined||value===null||value===''?'--':Str
 function html(value){return safe(value).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function errorMessage(err){return err&&err.message?err.message:String(err||'操作失败')}
 async function runAsync(label, fn){try{return await fn()}catch(err){showToast((label?label+'：':'')+errorMessage(err));return null}}
+async function logout(){return runAsync('退出失败',async()=>{const res=await fetch('/logout',{method:'POST'});if(!res.ok)throw new Error(res.statusText||('HTTP '+res.status));location.href='/login'})}
 function refreshLater(){setTimeout(()=>runAsync('刷新失败',()=>Promise.all([loadSubscriptions(),loadStats(),loadProxies()])),4000)}
 function maskAddress(address){if(!address)return '--';const parts=String(address).split(':');const host=parts[0]||address;if(host.length<=8)return host+(parts[1]?':'+parts[1]:'');return host.slice(0,4)+'...'+host.slice(-4)+(parts[1]?':'+parts[1]:'')}
 function addressArg(address){return encodeURIComponent(String(address||'')).replace(/[!'()*]/g,c=>'%'+c.charCodeAt(0).toString(16).toUpperCase())}

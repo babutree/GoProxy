@@ -85,7 +85,10 @@ func topKByLatency(proxies []storage.Proxy, k int) []storage.Proxy {
 		if ri != rj {
 			return ri < rj
 		}
-		return sorted[i].Address < sorted[j].Address
+		if sorted[i].Address != sorted[j].Address {
+			return sorted[i].Address < sorted[j].Address
+		}
+		return sorted[i].ID < sorted[j].ID
 	})
 	if len(sorted) > k {
 		sorted = sorted[:k]
@@ -109,7 +112,7 @@ func resolveBoundProxy(store Store, sessions *affinity.Store, route auth.ParsedU
 		return nil, rebindRegion
 	}
 	proxy, err := store.GetProxyByID(binding.ProxyID)
-	if err != nil || !proxyAvailable(*proxy) || regionMismatch(proxy.Region, route.Region) {
+	if err != nil || proxy == nil || !proxyAvailable(*proxy) || regionMismatch(proxy.Region, route.Region) {
 		sessions.Remove(route.Session)
 		return nil, rebindRegion
 	}

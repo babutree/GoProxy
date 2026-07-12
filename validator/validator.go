@@ -33,6 +33,9 @@ func concurrencyBuffer(total, concurrency int) int {
 }
 
 func New(concurrency, timeoutSec int, validateURL string) *Validator {
+	if concurrency < 1 {
+		concurrency = 1
+	}
 	cfg := config.Get()
 	maxMs := 0
 	if cfg != nil {
@@ -88,6 +91,9 @@ func getExitIPInfo(client *http.Client) ipAPIInfo {
 		return ipAPIInfo{}
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return ipAPIInfo{}
+	}
 
 	var result struct {
 		Status      string `json:"status"`
@@ -213,7 +219,7 @@ func probeCloudflareBlocked(client *http.Client) int {
 }
 
 // aiProbeTargets 是 4 个 AI 服务可达性探测目标。选用各家公开的、无需鉴权即可返回
-// 响应（通常 401 缺 key）的端点：能连通即说明地区不封，连不通才是不可达。
+// 响应（通常 401 缺 key）的端点：401 说明服务可达但缺少凭据；403 表示请求被明确拒绝。
 // 抽成包级变量以便测试用 httptest URL 覆盖（真实 http 往返，不 mock）。
 var aiProbeTargets = map[string]string{
 	"openai": "https://api.openai.com/v1/models",
@@ -227,8 +233,8 @@ var aiProbeTargets = map[string]string{
 //
 // 语义注意：这里探测的是「能否连通该 AI 服务」，与 probeCloudflareBlocked 的
 // 「是否被拦截」语义不同。判定规则（每个 AI）：
-//   - 请求成功拿到任何 HTTP 响应（含 401/403/404，只是没 key/无权限）→ 0（可达）：
-//     能连通说明该地区不封锁该 AI。
+//   - HTTP 403 → 1（不可达）：服务或边缘明确拒绝该出口。
+//   - 其它 HTTP 响应（含 401/404）→ 0（可达）：能连通服务，401 仅表示缺少凭据。
 //   - 请求失败/超时/连接错误（连不通）→ 1（不可达）。
 //
 // 每个探测复用 client 已有的 Timeout（不无限等）。4 个探测串行执行，简单可靠；
@@ -246,7 +252,7 @@ func probeAIReachability(client *http.Client) string {
 	return string(data)
 }
 
-// probeOneAI 探测单个 AI 端点是否可达：拿到任何 HTTP 响应→0（可达），连不通/超时→1（不可达）。
+// probeOneAI 探测单个 AI 端点是否可达：403 或连接失败/超时→1（不可达），其它 HTTP 响应→0（可达）。
 func probeOneAI(client *http.Client, target string) int {
 	resp, err := client.Get(target)
 	if err != nil {
@@ -255,6 +261,9 @@ func probeOneAI(client *http.Client, target string) int {
 	// 只关心能否连通，主动读干净并关闭 body 以复用连接；不解析内容。
 	io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
 	resp.Body.Close()
+	if resp.StatusCode == http.StatusForbidden {
+		return 1
+	}
 	return 0
 }
 

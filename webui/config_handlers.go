@@ -2,7 +2,6 @@ package webui
 
 import (
 	"crypto/sha256"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -17,11 +16,11 @@ func (s *Server) apiConfig(w http.ResponseWriter, r *http.Request) {
 	cfg := config.Get()
 
 	jsonOK(w, map[string]interface{}{
-		"http_port":               cfg.HTTPPort,
-		"socks5_port":             cfg.SOCKS5Port,
-		"webui_port":              cfg.WebUIPort,
-		"proxy_auth_enabled":      cfg.ProxyAuthEnabled,
-		"proxy_auth_username":     cfg.ProxyAuthUsername,
+		"http_port":           cfg.HTTPPort,
+		"socks5_port":         cfg.SOCKS5Port,
+		"webui_port":          cfg.WebUIPort,
+		"proxy_auth_enabled":  cfg.ProxyAuthEnabled,
+		"proxy_auth_username": cfg.ProxyAuthUsername,
 		// 代理密码明文下发给已认证 WebUI，供前端拼接含密码的完整代理 URL 供一键复制。
 		// 登录密码仍只存哈希、绝不下发；此处仅下发代理认证密码。
 		"proxy_auth_password":     cfg.ProxyAuthPassword,
@@ -60,8 +59,8 @@ func (s *Server) apiConfigSave(w http.ResponseWriter, r *http.Request) {
 		WebUIPort             string   `json:"webui_port"`
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonError(w, "invalid request", http.StatusBadRequest)
+	if err := decodeJSON(r, &req); err != nil {
+		jsonDecodeError(w, err)
 		return
 	}
 
@@ -95,13 +94,15 @@ func (s *Server) apiConfigSave(w http.ResponseWriter, r *http.Request) {
 	newCfg.AllowedCountries = config.NormalizeCountryCodes(req.AllowedCountries)
 
 	if err := config.Save(&newCfg); err != nil {
-		jsonError(w, "save config error: "+err.Error(), http.StatusInternalServerError)
+		log.Printf("[webui] save config failed: %v", err)
+		jsonError(w, "failed to save config", http.StatusInternalServerError)
 		return
 	}
 	*s.cfg = newCfg
 	s.affinity.SetTTL(time.Duration(newCfg.SessionTTLMinutes) * time.Minute)
 	if err := s.applyCountryFilters(&newCfg); err != nil {
-		jsonError(w, "apply country filters error: "+err.Error(), http.StatusInternalServerError)
+		log.Printf("[webui] apply country filters failed: %v", err)
+		jsonError(w, "failed to apply country filters", http.StatusInternalServerError)
 		return
 	}
 

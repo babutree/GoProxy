@@ -383,6 +383,67 @@ func TestLoginCookieSecurityAttributes(t *testing.T) {
 	}
 }
 
+func TestLoginRejectsOversizedRequestBody(t *testing.T) {
+	server := newTestServer(t)
+	server.cfg.WebUIPasswordHash = sha256Hex("correct")
+	body := "password=" + strings.Repeat("a", maxLoginBody)
+	req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+
+	server.routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusRequestEntityTooLarge, rec.Body.String())
+	}
+}
+
+func TestLogoutRequiresPostAndCSRFProof(t *testing.T) {
+	server := newTestServer(t)
+	token := newSession()
+
+	getReq := httptest.NewRequest(http.MethodGet, "/logout", nil)
+	getReq.AddCookie(&http.Cookie{Name: "session", Value: token})
+	getRec := httptest.NewRecorder()
+	server.routes().ServeHTTP(getRec, getReq)
+	if getRec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET status = %d, want %d", getRec.Code, http.StatusMethodNotAllowed)
+	}
+	if !sessionTokenExists(token) {
+		t.Fatal("GET /logout invalidated the session")
+	}
+
+	postReq := httptest.NewRequest(http.MethodPost, "/logout", nil)
+	postReq.AddCookie(&http.Cookie{Name: "session", Value: token})
+	postRec := httptest.NewRecorder()
+	server.routes().ServeHTTP(postRec, postReq)
+	if postRec.Code != http.StatusForbidden {
+		t.Fatalf("POST without CSRF status = %d, want %d", postRec.Code, http.StatusForbidden)
+	}
+	if !sessionTokenExists(token) {
+		t.Fatal("CSRF-rejected logout invalidated the session")
+	}
+
+	allowedReq := httptest.NewRequest(http.MethodPost, "/logout", nil)
+	allowedReq.Header.Set("X-CSRF-Token", token)
+	allowedReq.AddCookie(&http.Cookie{Name: "session", Value: token})
+	allowedRec := httptest.NewRecorder()
+	server.routes().ServeHTTP(allowedRec, allowedReq)
+	if allowedRec.Code != http.StatusFound {
+		t.Fatalf("CSRF-authenticated POST status = %d, want %d", allowedRec.Code, http.StatusFound)
+	}
+	if sessionTokenExists(token) {
+		t.Fatal("successful logout retained the session")
+	}
+}
+
+func sessionTokenExists(token string) bool {
+	sessionsMu.Lock()
+	defer sessionsMu.Unlock()
+	_, ok := sessions[token]
+	return ok
+}
+
 func TestWriteAPIsRequireCSRFProof(t *testing.T) {
 	server := newTestServer(t)
 	token := newSession()
@@ -438,6 +499,119 @@ func TestSubscriptionFileContentRawContractAndSizeLimit(t *testing.T) {
 	serveAuthenticated(t, server, "/api/subscription/add", oversized, http.StatusRequestEntityTooLarge)
 }
 
+func TestJSONMutationRejectsTrailingValueWithoutSideEffect(t *testing.T) {
+	server := newTestServer(t)
+	if err := server.storage.AddManualProxy("203.0.113.30:8080", "http", "us", "before"); err != nil {
+		t.Fatalf("AddManualProxy() error = %v", err)
+	}
+
+	cases := []struct {
+		name string
+		path string
+		body string
+	}{
+		{"manual note", "/api/manual-node/note", `{"address":"203.0.113.30:8080","note":"after"}{}`},
+		{"proxy toggle", "/api/proxy/toggle", `{"address":"203.0.113.30:8080","enable":false}{}`},
+		{"subscription add", "/api/subscription/add", `{"name":"bad","url":"https://example.test/sub","refresh_min":60}{}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			serveAuthenticated(t, server, tc.path, tc.body, http.StatusBadRequest)
+		})
+	}
+
+	proxy, err := server.storage.GetProxyByAddress("203.0.113.30:8080")
+	if err != nil {
+		t.Fatalf("GetProxyByAddress() error = %v", err)
+	}
+	if proxy.Note != "before" || proxy.UserPaused {
+		t.Fatalf("proxy mutated by invalid JSON: note=%q user_paused=%v", proxy.Note, proxy.UserPaused)
+	}
+	subs, err := server.storage.GetSubscriptions()
+	if err != nil {
+		t.Fatalf("GetSubscriptions() error = %v", err)
+	}
+	if len(subs) != 0 {
+		t.Fatalf("invalid JSON added %d subscriptions", len(subs))
+	}
+}
+
+func TestOversizedJSONMutationsReturnRequestEntityTooLarge(t *testing.T) {
+	server := newTestServer(t)
+	padding := strings.Repeat("a", maxAPIRequestBody)
+	cases := []struct {
+		name string
+		path string
+		body string
+	}{
+		{"proxy", "/api/proxy/toggle", `{"address":"203.0.113.30:8080","padding":"` + padding + `"}`},
+		{"manual node", "/api/manual-node/note", `{"address":"203.0.113.30:8080","padding":"` + padding + `"}`},
+		{"config", "/api/config/save", `{"proxy_auth_username":"edge","padding":"` + padding + `"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			serveAuthenticated(t, server, tc.path, tc.body, http.StatusRequestEntityTooLarge)
+		})
+	}
+}
+
+func TestConcurrentSubscriptionUploadsUseUniqueFiles(t *testing.T) {
+	server := newTestServer(t)
+	dataDir := t.TempDir()
+	t.Setenv("DATA_DIR", dataDir)
+	const count = 12
+	start := make(chan struct{})
+	results := make(chan *httptest.ResponseRecorder, count)
+
+	for i := 0; i < count; i++ {
+		go func(i int) {
+			<-start
+			payload := fmt.Sprintf(`{"name":"sub-%d","file_content":"node-%d","refresh_min":60}`, i, i)
+			req := authenticatedJSONRequest(http.MethodPost, "/api/subscription/add", payload)
+			rec := httptest.NewRecorder()
+			server.routes().ServeHTTP(rec, req)
+			results <- rec
+		}(i)
+	}
+	close(start)
+	for i := 0; i < count; i++ {
+		if rec := <-results; rec.Code != http.StatusOK {
+			t.Fatalf("upload status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+	}
+
+	subs, err := server.storage.GetSubscriptions()
+	if err != nil {
+		t.Fatalf("GetSubscriptions() error = %v", err)
+	}
+	paths := make(map[string]struct{}, len(subs))
+	for _, sub := range subs {
+		paths[sub.FilePath] = struct{}{}
+	}
+	if len(subs) != count || len(paths) != count {
+		t.Fatalf("subscriptions=%d unique paths=%d, want %d", len(subs), len(paths), count)
+	}
+}
+
+func TestSubscriptionUploadCleansFileWhenDatabaseInsertFails(t *testing.T) {
+	server := newTestServer(t)
+	dataDir := t.TempDir()
+	t.Setenv("DATA_DIR", dataDir)
+	if err := server.storage.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	serveAuthenticated(t, server, "/api/subscription/add", `{"name":"orphan","file_content":"node","refresh_min":60}`, http.StatusInternalServerError)
+
+	files, err := filepath.Glob(filepath.Join(dataDir, "subscriptions", "*"))
+	if err != nil {
+		t.Fatalf("Glob() error = %v", err)
+	}
+	if len(files) != 0 {
+		t.Fatalf("database failure left uploaded files: %#v", files)
+	}
+}
+
 func TestAPIErrorResponsesAreSanitized(t *testing.T) {
 	server := newTestServer(t)
 	if err := server.storage.Close(); err != nil {
@@ -457,6 +631,58 @@ func TestAPIErrorResponsesAreSanitized(t *testing.T) {
 			t.Fatalf("response leaked %q: %s", leaked, rec.Body.String())
 		}
 	}
+}
+
+func TestConfigSaveErrorsAreSanitized(t *testing.T) {
+	t.Run("persistence error", func(t *testing.T) {
+		server := newTestServer(t)
+		server.cfg.ProxyAuthUsername = "old"
+		server.cfg.SessionTTLMinutes = 10
+		server.cfg.HealthIntervalMinutes = 5
+		server.cfg.SingBoxPath = "sing-box"
+		setTestGlobalConfig(t, server.cfg)
+		badDataDir := filepath.Join(t.TempDir(), "private-config-location")
+		if err := os.WriteFile(badDataDir, []byte("file"), 0600); err != nil {
+			t.Fatalf("create bad DATA_DIR file: %v", err)
+		}
+		t.Setenv("DATA_DIR", badDataDir)
+		payload := `{"proxy_auth_username":"new","session_ttl_minutes":10,"health_check_interval":5,"max_retry":0,"singbox_path":"sing-box"}`
+		req := authenticatedJSONRequest(http.MethodPost, "/api/config/save", payload)
+		rec := httptest.NewRecorder()
+
+		server.routes().ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+		}
+		if rec.Body.String() != "{\"error\":\"failed to save config\"}\n" {
+			t.Fatalf("response leaked persistence detail: %s", rec.Body.String())
+		}
+	})
+
+	t.Run("country filter error", func(t *testing.T) {
+		server := newTestServer(t)
+		server.cfg.ProxyAuthUsername = "old"
+		server.cfg.SessionTTLMinutes = 10
+		server.cfg.HealthIntervalMinutes = 5
+		server.cfg.SingBoxPath = "sing-box"
+		setTestGlobalConfig(t, server.cfg)
+		if err := server.storage.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+		payload := `{"proxy_auth_username":"new","session_ttl_minutes":10,"health_check_interval":5,"max_retry":0,"singbox_path":"sing-box","blocked_countries":["CN"]}`
+		req := authenticatedJSONRequest(http.MethodPost, "/api/config/save", payload)
+		rec := httptest.NewRecorder()
+
+		server.routes().ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+		}
+		if rec.Body.String() != "{\"error\":\"failed to apply country filters\"}\n" {
+			t.Fatalf("response leaked storage detail: %s", rec.Body.String())
+		}
+	})
 }
 
 func TestAuthCheckIsPublicAndNeutral(t *testing.T) {

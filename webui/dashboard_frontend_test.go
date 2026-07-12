@@ -507,3 +507,22 @@ func TestDashboardSubscriptionCustomHeaders(t *testing.T) {
 		})
 	}
 }
+
+func TestDashboardLogoutUsesPostFlow(t *testing.T) {
+	checks := []string{
+		`<button class="btn danger" onclick="logout()">退出</button>`,
+		"async function logout(){return runAsync('退出失败'",
+		"fetch('/logout',{method:'POST'})",
+	}
+	for _, check := range checks {
+		t.Run(check, func(t *testing.T) {
+			if !strings.Contains(dashboardHTML, check) {
+				t.Fatalf("dashboardHTML missing POST logout invariant %q", check)
+			}
+		})
+	}
+
+	if strings.Contains(dashboardHTML, `href="/logout"`) {
+		t.Fatal("dashboardHTML still exposes logout as a GET link")
+	}
+}
