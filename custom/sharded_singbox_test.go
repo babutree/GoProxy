@@ -16,11 +16,15 @@ type spyShard struct {
 	lastKeys    map[string]bool
 	stopCalls   int
 
-	reloadErr  error
-	status     SingBoxRuntimeStatus
-	portMap    map[string]int
-	localAddrs map[string]string
-	nodes      []ParsedNode
+	reloadErr error
+	// incompletePorts：模拟段满跳过——Reload 返回 nil 但不为目标 key 分配端口。
+	incompletePorts bool
+	// forcePartial：模拟 ports_not_ready——portMap 完整但 Status=Partial。
+	forcePartial bool
+	status       SingBoxRuntimeStatus
+	portMap      map[string]int
+	localAddrs   map[string]string
+	nodes        []ParsedNode
 }
 
 func newSpyShard() *spyShard {
@@ -44,6 +48,38 @@ func (s *spyShard) Reload(nodes []ParsedNode) error {
 		return s.reloadErr
 	}
 	s.nodes = append([]ParsedNode(nil), nodes...)
+	if s.incompletePorts {
+		s.portMap = map[string]int{}
+		s.status = SingBoxRuntimeStatus{
+			Running:    true,
+			Status:     SingBoxStatusRunning,
+			ReadyPorts: 0,
+			TotalPorts: 0,
+		}
+		return nil
+	}
+	s.portMap = make(map[string]int, len(nodes))
+	for i, n := range nodes {
+		s.portMap[n.NodeKey()] = 10000 + i
+	}
+	if s.forcePartial {
+		s.status = SingBoxRuntimeStatus{
+			Running:    true,
+			Status:     SingBoxStatusPartial,
+			Reason:     "ports_not_ready",
+			Nodes:      len(nodes),
+			ReadyPorts: 0,
+			TotalPorts: len(nodes),
+		}
+		return nil
+	}
+	s.status = SingBoxRuntimeStatus{
+		Running:    true,
+		Status:     SingBoxStatusRunning,
+		Nodes:      len(nodes),
+		ReadyPorts: len(nodes),
+		TotalPorts: len(nodes),
+	}
 	return nil
 }
 
@@ -462,6 +498,58 @@ func TestReloadNodeRemovalReloadsOnlyAffectedShard(t *testing.T) {
 		if s.calls() != want {
 			t.Fatalf("分片 %d Reload 次数=%d，期望 %d（受影响分片 idxX=%d）", i, s.calls(), want, idxX)
 		}
+	}
+}
+
+// TestReloadDoesNotCommitAssignedKeysOnIncompletePortMap 覆盖段满/跳过节点假成功：
+// shard.Reload 返回 nil 但 portMap 缺少目标 key 时，不得提交 assignedKeys，且整体 Reload 必须报错。
+func TestReloadDoesNotCommitAssignedKeysOnIncompletePortMap(t *testing.T) {
+	const n = 4
+	sb, spies := newSpyOrchestrator(10000, n)
+	node := tunnelNode("seg-full", "seg-full.example.com", "pw")
+	idx := shardIndexForKey(node.NodeKey(), n)
+	spies[idx].incompletePorts = true
+
+	err := sb.Reload([]ParsedNode{node})
+	if err == nil {
+		t.Fatal("portMap 缺少目标 key 时 Reload 应返回 error，得到 nil")
+	}
+	if len(sb.assignedKeys[idx]) != 0 {
+		t.Fatalf("incomplete 时不得提交 assignedKeys，得到 %v", sb.assignedKeys[idx])
+	}
+}
+
+// TestReloadDoesNotCommitAssignedKeysOnPartialStatus 覆盖 Partial 假成功：
+// ReadyPorts < TotalPorts / Status=partial 时不得提交 assignedKeys。
+func TestReloadDoesNotCommitAssignedKeysOnPartialStatus(t *testing.T) {
+	const n = 4
+	sb, spies := newSpyOrchestrator(10000, n)
+	node := tunnelNode("partial-node", "partial.example.com", "pw")
+	idx := shardIndexForKey(node.NodeKey(), n)
+	spies[idx].forcePartial = true
+
+	err := sb.Reload([]ParsedNode{node})
+	if err == nil {
+		t.Fatal("Partial 状态时 Reload 应返回 error，得到 nil")
+	}
+	if len(sb.assignedKeys[idx]) != 0 {
+		t.Fatalf("Partial 时不得提交 assignedKeys，得到 %v", sb.assignedKeys[idx])
+	}
+}
+
+// TestReloadCommitsAssignedKeysOnlyWhenFullyReady 对照：全就绪且 portMap 完整时仍应提交。
+func TestReloadCommitsAssignedKeysOnlyWhenFullyReady(t *testing.T) {
+	const n = 4
+	sb, _ := newSpyOrchestrator(10000, n)
+	node := tunnelNode("ready-node", "ready.example.com", "pw")
+	idx := shardIndexForKey(node.NodeKey(), n)
+	key := node.NodeKey()
+
+	if err := sb.Reload([]ParsedNode{node}); err != nil {
+		t.Fatalf("全就绪 Reload 应成功: %v", err)
+	}
+	if !sb.assignedKeys[idx][key] {
+		t.Fatalf("全就绪时应提交 assignedKeys，得到 %v", sb.assignedKeys[idx])
 	}
 }
 

@@ -177,6 +177,73 @@ func TestRefreshSubscriptionFailureKeepsOldUsableProxy(t *testing.T) {
 	}
 }
 
+// TestRefreshSubscriptionKeepsOldProxyWhenReloadIncomplete 覆盖假成功路径：
+// Reload 表面成功但 portMap 缺目标 key（段满跳过）时，不得 DeleteBySubscriptionID。
+func TestRefreshSubscriptionKeepsOldProxyWhenReloadIncomplete(t *testing.T) {
+	store := newTestStorage(t)
+	file := writeSubscriptionFile(t, "trojan://password@new.example.com:443?sni=new.example.com#new")
+	subID, err := store.AddSubscription("sub", "", file, "auto", 60, "")
+	if err != nil {
+		t.Fatalf("AddSubscription() error = %v", err)
+	}
+	oldAddr := "127.0.0.1:39002"
+	if err := store.AddProxyWithSource(oldAddr, "socks5", storage.SourceSubscription, subID); err != nil {
+		t.Fatalf("AddProxyWithSource() error = %v", err)
+	}
+
+	sb, spies := newSpyOrchestrator(10000, 1)
+	// 模拟段满：Reload 返回 nil，但 portMap 为空（目标节点未分配端口）。
+	spies[0].incompletePorts = true
+
+	m := &Manager{
+		storage:   store,
+		validator: validator.New(1, 1, "http://127.0.0.1/validate"),
+		singbox:   sb,
+	}
+
+	if err := m.RefreshSubscription(subID); err == nil {
+		t.Fatal("RefreshSubscription() 在 portMap 不完整时应返回 error，得到 nil（假成功会删旧代理）")
+	}
+	proxy, err := store.GetProxyByAddress(oldAddr)
+	if err != nil {
+		t.Fatalf("incomplete Reload 后旧可用代理被删除: %v", err)
+	}
+	if proxy.Status != "active" {
+		t.Fatalf("old proxy status = %q, want active", proxy.Status)
+	}
+}
+
+// TestRefreshSubscriptionKeepsOldProxyWhenReloadPartial 覆盖 Partial 假成功：
+// 分片报告 Partial/ports_not_ready 时不得清掉旧订阅代理。
+func TestRefreshSubscriptionKeepsOldProxyWhenReloadPartial(t *testing.T) {
+	store := newTestStorage(t)
+	file := writeSubscriptionFile(t, "trojan://password@partial.example.com:443?sni=partial.example.com#partial")
+	subID, err := store.AddSubscription("sub", "", file, "auto", 60, "")
+	if err != nil {
+		t.Fatalf("AddSubscription() error = %v", err)
+	}
+	oldAddr := "127.0.0.1:39003"
+	if err := store.AddProxyWithSource(oldAddr, "socks5", storage.SourceSubscription, subID); err != nil {
+		t.Fatalf("AddProxyWithSource() error = %v", err)
+	}
+
+	sb, spies := newSpyOrchestrator(10000, 1)
+	spies[0].forcePartial = true
+
+	m := &Manager{
+		storage:   store,
+		validator: validator.New(1, 1, "http://127.0.0.1/validate"),
+		singbox:   sb,
+	}
+
+	if err := m.RefreshSubscription(subID); err == nil {
+		t.Fatal("RefreshSubscription() 在 Partial 时应返回 error，得到 nil")
+	}
+	if _, err := store.GetProxyByAddress(oldAddr); err != nil {
+		t.Fatalf("Partial Reload 后旧可用代理被删除: %v", err)
+	}
+}
+
 func TestRefreshSubscriptionAddsNewDirectNodesDisabledUntilValidated(t *testing.T) {
 	store := newTestStorage(t)
 	proxyAddr, validateURL := startRejectingHTTPProxy(t)

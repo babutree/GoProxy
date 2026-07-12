@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -462,11 +464,78 @@ func (s *Server) dialViaProxy(p *storage.Proxy, host string) (net.Conn, error) {
 		}
 		return &bufferedConn{Conn: conn, reader: reader}, nil
 	case "socks5":
-		dialer, err := proxy.SOCKS5("tcp", p.Address, nil, proxy.Direct)
+		// Manual SOCKS5 handshake so ValidateTimeout can bound the silent-upstream case
+		// (golang.org/x/net/proxy has no per-handshake SetDeadline).
+		dialer := &net.Dialer{Timeout: timeout}
+		proxyConn, err := dialer.Dial("tcp", p.Address)
 		if err != nil {
 			return nil, err
 		}
-		return dialer.Dial("tcp", host)
+		if timeout > 0 {
+			if err := proxyConn.SetDeadline(time.Now().Add(timeout)); err != nil {
+				proxyConn.Close()
+				return nil, err
+			}
+		}
+
+		if _, err := proxyConn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
+			proxyConn.Close()
+			return nil, err
+		}
+
+		handshake := make([]byte, 2)
+		if _, err := io.ReadFull(proxyConn, handshake); err != nil {
+			proxyConn.Close()
+			return nil, err
+		}
+		if handshake[0] != 0x05 || handshake[1] != 0x00 {
+			proxyConn.Close()
+			return nil, fmt.Errorf("socks5 handshake failed")
+		}
+
+		targetHost, port, err := net.SplitHostPort(host)
+		if err != nil {
+			proxyConn.Close()
+			return nil, err
+		}
+
+		req := []byte{0x05, 0x01, 0x00} // VER, CMD=CONNECT, RSV
+		if ip := net.ParseIP(targetHost); ip != nil {
+			if ip4 := ip.To4(); ip4 != nil {
+				req = append(req, 0x01)
+				req = append(req, ip4...)
+			} else {
+				req = append(req, 0x04)
+				req = append(req, ip...)
+			}
+		} else {
+			req = append(req, 0x03)
+			req = append(req, byte(len(targetHost)))
+			req = append(req, []byte(targetHost)...)
+		}
+
+		portUint, err := strconv.ParseUint(port, 10, 16)
+		if err != nil {
+			proxyConn.Close()
+			return nil, err
+		}
+		portBytes := make([]byte, 2)
+		binary.BigEndian.PutUint16(portBytes, uint16(portUint))
+		req = append(req, portBytes...)
+
+		if _, err := proxyConn.Write(req); err != nil {
+			proxyConn.Close()
+			return nil, err
+		}
+		if err := readSOCKS5ConnectReply(proxyConn); err != nil {
+			proxyConn.Close()
+			return nil, err
+		}
+		if err := proxyConn.SetDeadline(time.Time{}); err != nil {
+			proxyConn.Close()
+			return nil, err
+		}
+		return proxyConn, nil
 	default:
 		return nil, fmt.Errorf("unsupported protocol: %s", p.Protocol)
 	}

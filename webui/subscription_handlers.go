@@ -207,14 +207,7 @@ func (s *Server) apiSubscriptionDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 先删除该订阅关联的代理
-	if s.customMgr != nil {
-		deleted, _ := s.storage.DeleteBySubscriptionID(req.ID)
-		if deleted > 0 {
-			log.Printf("[webui] 清理订阅 #%d 关联的 %d 个代理", req.ID, deleted)
-		}
-	}
-
+	// DeleteSubscription 内部事务已一并删除关联代理，禁止前置 DeleteBySubscriptionID 绕过事务。
 	if err := s.storage.DeleteSubscription(req.ID); err != nil {
 		log.Printf("[webui] delete subscription #%d failed: %v", req.ID, err)
 		jsonError(w, "failed to delete subscription", http.StatusInternalServerError)

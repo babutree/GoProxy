@@ -1,6 +1,9 @@
 package custom
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestAssembleConfigReusesFreedLowPort 验证缺陷4（端口泄漏）：
 // 当某节点被移除后，其占用的低位端口应被释放并可被新节点复用，
@@ -66,6 +69,35 @@ func TestAssembleConfigStaysWithinSegmentAndSkipsOnOverflow(t *testing.T) {
 	// 段已满，新节点必须被跳过（不出现在 portMap 中）。
 	if p, ok := m[newNode.NodeKey()]; ok {
 		t.Fatalf("段已满时新节点未被跳过，仍被分配端口 %d", p)
+	}
+}
+
+// TestReloadSegmentFullReturnsIncompleteError 覆盖段满跳过假成功：
+// 端口段已满导致新节点不进 portMap 时，Reload 必须返回 error（在启动进程前即可判定），
+// 不得 return nil 让上层 RefreshSubscription 删旧代理。
+func TestReloadSegmentFullReturnsIncompleteError(t *testing.T) {
+	s := NewSingBoxProcess("missing-sing-box", t.TempDir(), testSingBoxBasePort)
+
+	nodeE := tunnelNode("e", "e.example.com", "pw-e")
+	topPort := testSingBoxBasePort + portRangeSpan - 1
+	s.portMap = map[string]int{nodeE.NodeKey(): topPort}
+	s.nodes = []ParsedNode{nodeE}
+
+	newNode := tunnelNode("new", "new.example.com", "pw-new")
+	err := s.Reload([]ParsedNode{nodeE, newNode})
+	if err == nil {
+		t.Fatal("段满跳过节点时 Reload 应返回 incomplete error，得到 nil")
+	}
+	// 必须是端口不完整类错误，而非仅 binary_not_found（否则段满在缺二进制时被掩盖，
+	// 有二进制时仍会假成功）。
+	msg := err.Error()
+	if !strings.Contains(msg, "不完整") && !strings.Contains(msg, "incomplete") &&
+		!strings.Contains(msg, "未分配") && !strings.Contains(msg, "段") {
+		t.Fatalf("段满应在启动前以 incomplete/未分配失败，实际: %v", err)
+	}
+	// 失败后不得把未分配节点伪装进 portMap（restore 后可能仍是旧 E 映射）。
+	if _, ok := s.GetPortMap()[newNode.NodeKey()]; ok {
+		t.Fatal("失败路径不应保留未分配新节点的端口映射")
 	}
 }
 

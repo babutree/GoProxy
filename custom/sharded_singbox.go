@@ -158,11 +158,38 @@ func (sb *ShardedSingBox) Reload(nodes []ParsedNode) error {
 			errs = append(errs, fmt.Errorf("shard %d: %w", i, err))
 			continue
 		}
+		// 仅 ReadyPorts==TotalPorts 且目标 key 均在 portMap 时才提交 assignedKeys。
+		// Partial / 段满跳过等假成功不得提交，否则上层会删旧代理。
+		if err := shardReloadCommitError(target[i], sb.shards[i]); err != nil {
+			errs = append(errs, fmt.Errorf("shard %d: %w", i, err))
+			continue
+		}
 		sb.assignedKeys[i] = newKeys
 	}
 
 	if len(errs) > 0 {
 		return errors.Join(errs...)
+	}
+	return nil
+}
+
+// shardReloadCommitError 在分片 Reload 返回 nil 后二次校验是否可提交 assignedKeys。
+// 空目标（停止分片）视为完整；否则要求 portMap 覆盖全部目标 key，且运行态全就绪。
+func shardReloadCommitError(target []ParsedNode, shard singBoxShard) error {
+	if len(target) == 0 {
+		return nil
+	}
+	portMap := shard.GetPortMap()
+	if err := incompletePortAllocationError(target, portMap); err != nil {
+		return err
+	}
+	rs := shard.GetRuntimeStatus()
+	if rs.Status == SingBoxStatusPartial || rs.Reason == "ports_not_ready" {
+		return fmt.Errorf("sing-box 重载不完整: status=%s reason=%s ready=%d/%d",
+			rs.Status, rs.Reason, rs.ReadyPorts, rs.TotalPorts)
+	}
+	if rs.TotalPorts > 0 && rs.ReadyPorts != rs.TotalPorts {
+		return fmt.Errorf("sing-box 端口未完全就绪（%d/%d）", rs.ReadyPorts, rs.TotalPorts)
 	}
 	return nil
 }

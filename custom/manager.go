@@ -284,14 +284,17 @@ func (m *Manager) RefreshSubscription(subID int64) error {
 
 		if err := m.singbox.Reload(mergedNodes); err != nil {
 			return fmt.Errorf("sing-box 重载失败: %w", err)
-		} else {
-			portMap := m.singbox.GetPortMap()
-			for _, node := range tunnelNodes {
-				key := node.NodeKey()
-				if port, ok := portMap[key]; ok {
-					addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
-					tunnelProxies = append(tunnelProxies, tunnelProxy{addr: addr, proto: "socks5"})
-				}
+		}
+		portMap := m.singbox.GetPortMap()
+		// 防御：即使 Reload 误返回 nil，当前订阅 tunnel key 未全部分配端口也不得删旧代理。
+		if err := incompletePortAllocationError(tunnelNodes, portMap); err != nil {
+			return fmt.Errorf("sing-box 重载失败: %w", err)
+		}
+		for _, node := range tunnelNodes {
+			key := node.NodeKey()
+			if port, ok := portMap[key]; ok {
+				addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+				tunnelProxies = append(tunnelProxies, tunnelProxy{addr: addr, proto: "socks5"})
 			}
 		}
 	}

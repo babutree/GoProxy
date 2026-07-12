@@ -2,9 +2,17 @@ package webui
 
 import (
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"goproxy/config"
+	"goproxy/custom"
+	"goproxy/storage"
+	"goproxy/validator"
 )
 
 type failingSubscriptionFile struct {
@@ -51,5 +59,48 @@ func TestWriteSubscriptionFilePropagatesWriteErrorAndCleansUp(t *testing.T) {
 	}
 	if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("temporary file still exists after write failure: %v", statErr)
+	}
+}
+
+// TestAPISubscriptionDeleteDoesNotPreDeleteProxiesWhenSubscriptionDeleteFails
+// 回归：handler 不得在 DeleteSubscription 事务外先 DeleteBySubscriptionID。
+// 否则 DeleteSubscription 失败后会留下“空订阅 + 代理已丢”的半删状态。
+func TestAPISubscriptionDeleteDoesNotPreDeleteProxiesWhenSubscriptionDeleteFails(t *testing.T) {
+	server := newTestServer(t)
+	// customMgr 非 nil 才会走旧双删路径中的前置清理分支
+	server.customMgr = custom.NewManager(server.storage, validator.New(1, 1, "http://127.0.0.1"), &config.Config{})
+
+	subID, err := server.storage.AddSubscription("sub", "https://example.test/webui-delete.yaml", "", "auto", 60, "")
+	if err != nil {
+		t.Fatalf("AddSubscription() error = %v", err)
+	}
+	const proxyAddr = "198.51.100.50:8080"
+	if err := server.storage.AddProxyWithSource(proxyAddr, "http", storage.SourceSubscription, subID); err != nil {
+		t.Fatalf("AddProxyWithSource() error = %v", err)
+	}
+
+	// 强制订阅行删除失败，模拟 DeleteSubscription 事务中途失败
+	if _, err := server.storage.GetDB().Exec(`
+		CREATE TRIGGER fail_webui_subscription_delete
+		BEFORE DELETE ON subscriptions
+		WHEN OLD.id = ` + fmt.Sprint(subID) + `
+		BEGIN
+			SELECT RAISE(ABORT, 'forced subscription delete failure');
+		END`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+
+	req := authenticatedJSONRequest(http.MethodPost, "/api/subscription/delete", fmt.Sprintf(`{"id":%d}`, subID))
+	rec := httptest.NewRecorder()
+	server.routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+	if _, err := server.storage.GetSubscription(subID); err != nil {
+		t.Fatalf("subscription should remain after failed delete: %v", err)
+	}
+	if _, err := server.storage.GetProxyByIdentity(proxyAddr, storage.SourceSubscription, subID); err != nil {
+		t.Fatalf("proxies must not be pre-deleted outside DeleteSubscription transaction: %v", err)
 	}
 }

@@ -124,6 +124,13 @@ func (s *SingBoxProcess) Reload(nodes []ParsedNode) error {
 		s.setStatusLocked(SingBoxStatusFailed, "config_generation_failed", 0)
 		return fmt.Errorf("生成 sing-box 配置失败: %w", err)
 	}
+	// 段满/出站构建失败导致目标 key 未进 portMap：必须在启动前失败，
+	// 否则上层 Refresh 会把 nil 当成功并 DeleteBySubscriptionID。
+	if err := incompletePortAllocationError(tunnelNodes, s.portMap); err != nil {
+		restoreState()
+		s.setStatusLocked(SingBoxStatusFailed, "ports_incomplete", 0)
+		return err
+	}
 	if _, err := exec.LookPath(s.binPath); err != nil {
 		restoreState()
 		s.setStatusLocked(SingBoxStatusFailed, "binary_not_found", 0)
@@ -146,11 +153,22 @@ func (s *SingBoxProcess) Reload(nodes []ParsedNode) error {
 			s.setStatusLocked(SingBoxStatusFailed, "config_rebuild_failed", 0)
 			return fmt.Errorf("重建 sing-box 配置失败: %w", err)
 		}
+		if err := incompletePortAllocationError(goodNodes, s.portMap); err != nil {
+			restoreState()
+			s.setStatusLocked(SingBoxStatusFailed, "ports_incomplete", 0)
+			return err
+		}
 	}
 
 	// 重启进程
 	s.stopLocked()
 	if err := s.startLocked(); err != nil {
+		// Partial：新进程已在跑且配置/portMap 已是本次目标，不可 restore 回旧映射（会与进程脱节）。
+		// 仍返回 error，使 RefreshSubscription 保留旧代理。
+		if s.status == SingBoxStatusPartial {
+			s.nodes = goodNodes
+			return fmt.Errorf("启动 sing-box 失败: %w", err)
+		}
 		restoreState()
 		s.setStatusLocked(SingBoxStatusFailed, classifySingBoxStartError(err), 0)
 		return fmt.Errorf("启动 sing-box 失败: %w", err)
@@ -158,6 +176,21 @@ func (s *SingBoxProcess) Reload(nodes []ParsedNode) error {
 
 	s.nodes = goodNodes
 	return nil
+}
+
+// incompletePortAllocationError 在目标 tunnel key 未全部进入 portMap 时返回明确错误。
+// 段满跳过、buildOutbound 失败等静默丢节点都不得被当作 Reload 成功。
+func incompletePortAllocationError(nodes []ParsedNode, portMap map[string]int) error {
+	missing := 0
+	for _, n := range nodes {
+		if _, ok := portMap[n.NodeKey()]; !ok {
+			missing++
+		}
+	}
+	if missing == 0 {
+		return nil
+	}
+	return fmt.Errorf("sing-box 端口分配不完整: %d/%d 节点未分配端口（段满或配置跳过）", missing, len(nodes))
 }
 
 // checkNodes 生成一份仅含给定节点的临时配置并运行 sing-box check，返回是否通过。
@@ -687,11 +720,11 @@ func (s *SingBoxProcess) startLocked() error {
 	if readyPorts < totalPorts {
 		s.setStatusLocked(SingBoxStatusPartial, "ports_not_ready", readyPorts)
 		log.Printf("[custom] ⚠️ sing-box 端口未完全就绪，部分节点可能不可用（%d/%d）", readyPorts, totalPorts)
-	} else {
-		s.setStatusLocked(SingBoxStatusRunning, SingBoxStatusRunning, readyPorts)
-		log.Printf("[custom] ✅ sing-box 启动成功，管理 %d 个节点", totalPorts)
+		// Partial 不得 return nil：否则 RefreshSubscription 会删旧代理并入库不完整配置。
+		return fmt.Errorf("sing-box 端口未完全就绪（%d/%d）", readyPorts, totalPorts)
 	}
-
+	s.setStatusLocked(SingBoxStatusRunning, SingBoxStatusRunning, readyPorts)
+	log.Printf("[custom] ✅ sing-box 启动成功，管理 %d 个节点", totalPorts)
 	return nil
 }
 
@@ -772,6 +805,10 @@ func classifySingBoxStartError(err error) string {
 		return "process_exited_on_start"
 	case strings.Contains(msg, "未分配"):
 		return "no_ports_allocated"
+	case strings.Contains(msg, "未完全就绪"):
+		return "ports_not_ready"
+	case strings.Contains(msg, "不完整"):
+		return "ports_incomplete"
 	default:
 		return "start_failed"
 	}

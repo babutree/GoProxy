@@ -3,7 +3,8 @@ package proxy
 import "testing"
 
 // TestIsBypassTarget 验证内网/本地目标判定：这些地址应直连，不经上游节点转发。
-// 覆盖 localhost、.local、IPv4 私网段(RFC1918)、回环、link-local，以及 IPv6 回环/ULA/link-local。
+// 覆盖 localhost、.local、IPv4 私网段(RFC1918)、回环，以及 IPv6 回环/ULA。
+// link-local（169.254.0.0/16、fe80::/10）一律不 bypass，走上游，避免云 metadata 等凭据面被网关直连。
 // 目标可能带端口(host:port)或裸 host，可能是域名或 IP。
 func TestIsBypassTarget(t *testing.T) {
 	bypass := []string{
@@ -25,14 +26,11 @@ func TestIsBypassTarget(t *testing.T) {
 		// IPv4 私网 192.168.0.0/16
 		"192.168.1.1",
 		"192.168.0.100:80",
-		// IPv4 link-local 169.254.0.0/16
-		"169.254.1.1",
-		// IPv6 回环 / ULA / link-local
+		// IPv6 回环 / ULA（不含 link-local）
 		"::1",
 		"[::1]:8080",
 		"fc00::1",
 		"[fd12:3456::1]:443",
-		"fe80::1",
 	}
 	for _, h := range bypass {
 		if !isBypassTarget(h) {
@@ -46,9 +44,14 @@ func TestIsBypassTarget(t *testing.T) {
 		"www.google.com:443",
 		"1.1.1.1",
 		"8.8.8.8:53",
-		// 云厂商 metadata 地址绝不能被网关直连绕过，否则会暴露宿主凭据面。
+		// link-local 一律不 bypass（含云 metadata 与 ECS task 凭据端点）
 		"169.254.169.254",
 		"169.254.169.254:80",
+		"169.254.170.2",
+		"169.254.170.2:80",
+		"169.254.1.1",
+		"fe80::1",
+		"[fe80::1]:80",
 		// 172.32.x 不在私网 172.16/12 段内
 		"172.32.0.1",
 		// 11.x 不是私网
@@ -58,7 +61,7 @@ func TestIsBypassTarget(t *testing.T) {
 	}
 	for _, h := range direct {
 		if isBypassTarget(h) {
-			t.Errorf("isBypassTarget(%q) = true, want false (公网目标必须经上游)", h)
+			t.Errorf("isBypassTarget(%q) = true, want false (公网/link-local 必须经上游)", h)
 		}
 	}
 }

@@ -599,6 +599,90 @@ func TestSocks5UpstreamDialTimesOutWhenHandshakeDoesNotRespond(t *testing.T) {
 	}
 }
 
+func TestHTTPInboundSocks5UpstreamDialTimesOutWhenHandshakeDoesNotRespond(t *testing.T) {
+	upstream := startSilentTCPServer(t)
+	server := New(nil, proxyTestConfig(1), ":0")
+
+	done := make(chan error, 1)
+	go func() {
+		conn, err := server.dialViaProxy(&storage.Proxy{Address: upstream, Protocol: "socks5"}, "target.test:443")
+		if conn != nil {
+			conn.Close()
+		}
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("dialViaProxy() succeeded against silent SOCKS5 proxy, want timeout error")
+		}
+	case <-time.After(1500 * time.Millisecond):
+		t.Fatal("dialViaProxy() did not time out while waiting for SOCKS5 handshake")
+	}
+}
+
+func TestHTTPInboundSocks5UpstreamDialWithZeroTimeoutDoesNotExpireImmediately(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		// SOCKS5 greeting: VER=5, METHOD=no-auth
+		greeting := make([]byte, 3)
+		if _, err := io.ReadFull(conn, greeting); err != nil {
+			return
+		}
+		if _, err := conn.Write([]byte{0x05, 0x00}); err != nil {
+			return
+		}
+		// Read CONNECT request header (VER CMD RSV ATYP) then address+port.
+		header := make([]byte, 4)
+		if _, err := io.ReadFull(conn, header); err != nil {
+			return
+		}
+		switch header[3] {
+		case 0x01:
+			if _, err := io.ReadFull(conn, make([]byte, 4+2)); err != nil {
+				return
+			}
+		case 0x03:
+			lenBuf := make([]byte, 1)
+			if _, err := io.ReadFull(conn, lenBuf); err != nil {
+				return
+			}
+			if _, err := io.ReadFull(conn, make([]byte, int(lenBuf[0])+2)); err != nil {
+				return
+			}
+		case 0x04:
+			if _, err := io.ReadFull(conn, make([]byte, 16+2)); err != nil {
+				return
+			}
+		default:
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+		// Success reply: VER REP RSV ATYP=IPv4 0.0.0.0:0
+		_, _ = conn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+		time.Sleep(50 * time.Millisecond)
+	}()
+
+	cfg := proxyTestConfig(0)
+	cfg.ValidateTimeout = 0
+	server := New(nil, cfg, ":0")
+	conn, err := server.dialViaProxy(&storage.Proxy{Address: listener.Addr().String(), Protocol: "socks5"}, "target.test:443")
+	if err != nil {
+		t.Fatalf("dialViaProxy() with zero timeout error = %v, want no immediate deadline", err)
+	}
+	conn.Close()
+}
+
 func TestHTTPConnectDialWithZeroTimeoutDoesNotExpireImmediately(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
