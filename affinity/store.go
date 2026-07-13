@@ -24,10 +24,25 @@ type Store struct {
 	ttl      time.Duration
 	now      func() time.Time
 
+	// firstBindMu serializes first-bind / rebind check-then-write so capacity and
+	// cooldown decisions cannot interleave between concurrent sessions.
+	firstBindMu sync.Mutex
+
 	// GC lifecycle fields, guarded by mu.
 	gcStarted bool
 	stopCh    chan struct{}
 	doneCh    chan struct{}
+}
+
+// BeginFirstBind locks the first-bind critical section. Call EndFirstBind when done.
+// Sticky Get paths must not hold this lock.
+func (s *Store) BeginFirstBind() {
+	s.firstBindMu.Lock()
+}
+
+// EndFirstBind releases the first-bind critical section.
+func (s *Store) EndFirstBind() {
+	s.firstBindMu.Unlock()
 }
 
 // SessionBinding is a read-only snapshot of a single active session binding,
@@ -237,7 +252,10 @@ func (s *Store) gcLoop(interval time.Duration, stopCh, doneCh chan struct{}) {
 	}
 }
 
-// collectExpired removes every expired binding in a single locked pass.
+// collectExpired removes every expired binding in a single locked pass and
+// prunes cooldown entries whose deadline has passed. Cooldown pruning does not
+// depend on the proxy ever being queried again, so entries for proxies that
+// have permanently left the pool are reclaimed instead of leaking.
 func (s *Store) collectExpired() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -245,6 +263,13 @@ func (s *Store) collectExpired() {
 	for sessionID, binding := range s.bindings {
 		if s.expired(binding) {
 			s.removeBindingLocked(sessionID, binding)
+		}
+	}
+
+	now := s.now()
+	for proxyID, until := range s.cooldown {
+		if !now.Before(until) {
+			delete(s.cooldown, proxyID)
 		}
 	}
 }

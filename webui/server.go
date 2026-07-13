@@ -271,6 +271,8 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/subscription/refresh-all", s.authMiddleware(s.apiSubscriptionRefreshAll))
 	mux.HandleFunc("/api/subscription/toggle", s.authMiddleware(s.apiSubscriptionToggle))
 	mux.HandleFunc("/api/manual-node/add", s.authMiddleware(s.apiManualNodeAdd))
+	mux.HandleFunc("/api/manual-node/import", s.authMiddleware(s.apiManualNodeImport))
+	mux.HandleFunc("/api/manual-node/batch-delete", s.authMiddleware(s.apiManualNodeBatchDelete))
 	mux.HandleFunc("/api/manual-node/region", s.authMiddleware(s.apiManualNodeRegion))
 	mux.HandleFunc("/api/manual-node/note", s.authMiddleware(s.apiManualNodeNote))
 	mux.HandleFunc("/api/manual-node/delete", s.authMiddleware(s.apiManualNodeDelete))

@@ -26,7 +26,7 @@ func (s *Storage) GetByRegion(region string, excludes []int64) ([]Proxy, error) 
 		args = append(args, normalized)
 	}
 	excludeMap := makeExcludeMap(excludes)
-	query += ` ORDER BY CASE WHEN latency <= 0 THEN 1 ELSE 0 END, latency ASC, RANDOM()`
+	query += ` ORDER BY CASE WHEN latency <= 0 THEN 1 ELSE 0 END, latency ASC, address ASC, id ASC`
 	return s.queryProxies(query, args, excludeMap)
 }
 
@@ -178,7 +178,7 @@ func normalizeProtocol(protocol string) string {
 // 不复用/不改动 normalizeRegion：后者被 GetByRegion 查询过滤及
 // DisableBlockedCountries / DisableNotAllowedCountries 复用，那些路径依赖保留
 // 非 alpha2 原值——若在 normalizeRegion 里把非法值改成空串，disable 路径的
-// region = '' 会误匹配所有 region 为空（auto 地域未知）的节点，造成大范围误禁。
+// region = ” 会误匹配所有 region 为空（auto 地域未知）的节点，造成大范围误禁。
 func normalizeManualRegion(region string) string {
 	normalized := normalizeRegion(region)
 	if !alpha2RegionPattern.MatchString(normalized) {

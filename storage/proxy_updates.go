@@ -2,6 +2,7 @@ package storage
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -387,6 +388,9 @@ func (s *Storage) UnpauseProxyByID(id int64) error {
 	return requireRowsAffected(res.RowsAffected())
 }
 
+// ErrAmbiguousProxyAddress is returned when more than one proxy shares an address.
+var ErrAmbiguousProxyAddress = errors.New("ambiguous proxy address")
+
 func (s *Storage) requireUnambiguousAddress(address string) error {
 	var count int
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM proxies WHERE address = ?`, address).Scan(&count); err != nil {
@@ -396,7 +400,7 @@ func (s *Storage) requireUnambiguousAddress(address string) error {
 		return sql.ErrNoRows
 	}
 	if count > 1 {
-		return fmt.Errorf("proxy address %q is ambiguous", address)
+		return fmt.Errorf("%w: %q", ErrAmbiguousProxyAddress, address)
 	}
 	return nil
 }

@@ -141,8 +141,17 @@ func (sb *ShardedSingBox) Reload(nodes []ParsedNode) error {
 		sortNodesByKey(target[i])
 	}
 
-	// 4. 逐分片重载（跳过未变化分片）。
+	// 4. 逐分片重载（跳过未变化分片）。任一分片失败时，对已尝试变更的分片
+	// 回滚到旧 nodes 快照（含失败分片自身可能已写入的 Partial 运行态）。
+	oldNodesByShard := make([][]ParsedNode, len(sb.shards))
+	oldKeysByShard := make([]map[string]bool, len(sb.shards))
+	for i := range sb.shards {
+		oldNodesByShard[i] = append([]ParsedNode(nil), sb.shards[i].GetNodes()...)
+		oldKeysByShard[i] = copyKeySet(sb.assignedKeys[i])
+	}
+
 	var errs []error
+	touched := make([]bool, len(sb.shards))
 	for i := range sb.shards {
 		newKeys := make(map[string]bool, len(target[i]))
 		for _, n := range target[i] {
@@ -153,8 +162,8 @@ func (sb *ShardedSingBox) Reload(nodes []ParsedNode) error {
 		if keySetsEqual(newKeys, sb.assignedKeys[i]) && !shardNeedsReloadForRuntime(target[i], sb.shards[i]) {
 			continue
 		}
+		touched[i] = true
 		if err := sb.shards[i].Reload(target[i]); err != nil {
-			// 故障隔离：仅记录错误，保持该分片已分配集不变以便下次重试，不回滚其他分片。
 			errs = append(errs, fmt.Errorf("shard %d: %w", i, err))
 			continue
 		}
@@ -168,9 +177,43 @@ func (sb *ShardedSingBox) Reload(nodes []ParsedNode) error {
 	}
 
 	if len(errs) > 0 {
+		var rbErrs []error
+		for i := range sb.shards {
+			if !touched[i] {
+				continue
+			}
+			// Restore assignedKeys before/with rollback so a failed compensation
+			// still reflects the last known-good commit set.
+			sb.assignedKeys[i] = copyKeySet(oldKeysByShard[i])
+			if len(oldNodesByShard[i]) == 0 {
+				sb.shards[i].Stop()
+				continue
+			}
+			if err := sb.shards[i].Reload(oldNodesByShard[i]); err != nil {
+				rbErrs = append(rbErrs, fmt.Errorf("shard %d rollback: %w", i, err))
+				continue
+			}
+			if err := shardReloadCommitError(oldNodesByShard[i], sb.shards[i]); err != nil {
+				rbErrs = append(rbErrs, fmt.Errorf("shard %d rollback: %w", i, err))
+			}
+		}
+		if len(rbErrs) > 0 {
+			return errors.Join(append(errs, rbErrs...)...)
+		}
 		return errors.Join(errs...)
 	}
 	return nil
+}
+
+func copyKeySet(in map[string]bool) map[string]bool {
+	if in == nil {
+		return make(map[string]bool)
+	}
+	out := make(map[string]bool, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 // shardReloadCommitError 在分片 Reload 返回 nil 后二次校验是否可提交 assignedKeys。

@@ -1,11 +1,73 @@
 package webui
 
 import (
+	"database/sql"
+	"errors"
 	"log"
 	"net/http"
+	"strings"
 
 	"goproxy/storage"
 )
+
+func (s *Server) apiManualNodeImport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Text   string `json:"text"`
+		Region string `json:"region"`
+		Note   string `json:"note"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		jsonDecodeError(w, err)
+		return
+	}
+	if strings.TrimSpace(req.Text) == "" {
+		jsonError(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if s.customMgr == nil {
+		jsonError(w, "manual node manager unavailable", http.StatusInternalServerError)
+		return
+	}
+	result, err := s.customMgr.ImportManualLinks(req.Text, req.Region, req.Note)
+	if err != nil {
+		log.Printf("[webui] import manual nodes failed: %v", err)
+		jsonError(w, "failed to import manual nodes", http.StatusBadRequest)
+		return
+	}
+	jsonOK(w, result)
+}
+
+func (s *Server) apiManualNodeBatchDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		IDs []int64 `json:"ids"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		jsonDecodeError(w, err)
+		return
+	}
+	if len(req.IDs) == 0 {
+		jsonError(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if s.customMgr == nil {
+		jsonError(w, "manual node manager unavailable", http.StatusInternalServerError)
+		return
+	}
+	deleted, errs := s.customMgr.DeleteManualNodes(req.IDs)
+	jsonOK(w, map[string]interface{}{
+		"deleted": deleted,
+		"failed":  len(errs),
+		"errors":  errs,
+	})
+}
 
 func (s *Server) apiManualNodeAdd(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -82,7 +144,13 @@ func (s *Server) apiManualNodeDelete(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.storage.DeleteProxyByID(proxy.ID); err != nil {
+	if s.customMgr != nil {
+		if err := s.customMgr.DeleteManualNode(proxy.ID); err != nil {
+			log.Printf("[webui] delete manual node %q failed: %v", req.Address, err)
+			jsonError(w, "failed to delete manual node", http.StatusInternalServerError)
+			return
+		}
+	} else if err := s.storage.DeleteProxyByID(proxy.ID); err != nil {
 		log.Printf("[webui] delete manual node %q failed: %v", req.Address, err)
 		jsonError(w, "failed to delete manual node", http.StatusInternalServerError)
 		return
@@ -110,8 +178,18 @@ func (s *Server) requireManualNodeRequest(w http.ResponseWriter, r *http.Request
 		return nil, false
 	}
 	if err != nil {
-		log.Printf("[webui] manual node id=%d address=%q not found: %v", *id, *address, err)
-		jsonError(w, "manual node not found", http.StatusNotFound)
+		if errors.Is(err, storage.ErrAmbiguousProxyAddress) || strings.Contains(err.Error(), "ambiguous") {
+			log.Printf("[webui] manual node address %q ambiguous: %v", *address, err)
+			jsonError(w, "ambiguous proxy address; use id", http.StatusConflict)
+			return nil, false
+		}
+		if errors.Is(err, sql.ErrNoRows) || strings.Contains(err.Error(), "not found") {
+			log.Printf("[webui] manual node id=%d address=%q not found: %v", *id, *address, err)
+			jsonError(w, "manual node not found", http.StatusNotFound)
+			return nil, false
+		}
+		log.Printf("[webui] manual node id=%d address=%q lookup failed: %v", *id, *address, err)
+		jsonError(w, "failed to lookup manual node", http.StatusInternalServerError)
 		return nil, false
 	}
 	if proxy.Source != storage.SourceManual {

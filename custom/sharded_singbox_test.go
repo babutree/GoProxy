@@ -452,8 +452,9 @@ func TestReloadRetriesUnchangedIncompletePortMap(t *testing.T) {
 	if err == nil {
 		t.Fatal("无端口 incomplete 时 Reload 应返回 error")
 	}
-	if got := spies[idx].calls(); got != before+1 {
-		t.Fatalf("无端口 key 不得因 assignedKeys 永久跳过，Reload 次数=%d，期望 %d", got, before+1)
+	// forward incomplete attempt + compensation reload of old snapshot
+	if got := spies[idx].calls(); got < before+2 {
+		t.Fatalf("无端口 incomplete 应触发重载与回滚，Reload 次数=%d，期望 >= %d", got, before+2)
 	}
 	// 提交失败时保留旧 assignedKeys 以便下次仍走 needsReload；不得清空为“未分配”后静默成功。
 	if !sb.assignedKeys[idx][node.NodeKey()] {
@@ -717,22 +718,30 @@ func TestReloadFaultIsolation(t *testing.T) {
 	if !strings.Contains(err.Error(), fmt.Sprintf("shard %d", failIdx)) {
 		t.Fatalf("聚合错误应提及 shard %d，实际: %v", failIdx, err)
 	}
-	if spies[failIdx].calls() != 1 {
-		t.Fatalf("失败分片首次应被 Reload 1 次，得到 %d", spies[failIdx].calls())
+	if spies[failIdx].calls() < 1 {
+		t.Fatalf("失败分片首次应被 Reload，得到 %d", spies[failIdx].calls())
 	}
-	if spies[okIdx].calls() != 1 {
-		t.Fatalf("成功分片首次应被 Reload 1 次，得到 %d", spies[okIdx].calls())
+	// Successful shard is rolled back after sibling failure (empty old snapshot → Stop, not extra Reload).
+	if spies[okIdx].calls() < 1 {
+		t.Fatalf("成功分片首次应被 Reload，得到 %d", spies[okIdx].calls())
+	}
+	// After overall failure, assignedKeys stay at pre-reload snapshot (empty here).
+	if len(sb.assignedKeys[okIdx]) != 0 {
+		t.Fatalf("失败回滚后 ok 分片 assignedKeys 应为空，得到 %v", sb.assignedKeys[okIdx])
 	}
 
+	beforeFail := spies[failIdx].calls()
+	beforeOK := spies[okIdx].calls()
 	err = sb.Reload([]ParsedNode{nodeFail, nodeOK})
 	if err == nil {
 		t.Fatalf("第二次重载失败分片仍应报错")
 	}
-	if spies[failIdx].calls() != 2 {
-		t.Fatalf("失败分片应被重试（Reload 2 次），得到 %d", spies[failIdx].calls())
+	if spies[failIdx].calls() <= beforeFail {
+		t.Fatalf("失败分片应被重试，calls %d -> %d", beforeFail, spies[failIdx].calls())
 	}
-	if spies[okIdx].calls() != 1 {
-		t.Fatalf("成功且未变化的分片不应被再次 Reload，得到 %d", spies[okIdx].calls())
+	// ok shard must be attempted again because previous attempt was rolled back.
+	if spies[okIdx].calls() <= beforeOK {
+		t.Fatalf("回滚后成功分片应再次尝试 Reload，calls %d -> %d", beforeOK, spies[okIdx].calls())
 	}
 }
 

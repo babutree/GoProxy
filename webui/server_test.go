@@ -1000,6 +1000,99 @@ func TestProxyOccupancyAPIReturnsPerProxySessions(t *testing.T) {
 	}
 }
 
+// TestProxyOccupancyAPIReturnsActualCooldownRemaining: 冷却字段必须反映 affinity 真实剩余，
+// 而非硬编码 0。对 p1 设置 now+120s 冷却，断言其 cooldown_remaining_seconds 落在 (0,120]；
+// 未设置冷却的 p2 必须为 0。
+func TestProxyOccupancyAPIReturnsActualCooldownRemaining(t *testing.T) {
+	server := newTestServer(t)
+	server.cfg.MaxSessionsPerProxy = 1
+	if err := server.storage.AddManualProxy("203.0.113.61:8080", "http", "us", ""); err != nil {
+		t.Fatalf("AddManualProxy(p1) error = %v", err)
+	}
+	if err := server.storage.AddManualProxy("203.0.113.62:8080", "http", "jp", ""); err != nil {
+		t.Fatalf("AddManualProxy(p2) error = %v", err)
+	}
+	p1, err := server.storage.GetProxyByAddress("203.0.113.61:8080")
+	if err != nil {
+		t.Fatalf("GetProxyByAddress(p1) error = %v", err)
+	}
+	p2, err := server.storage.GetProxyByAddress("203.0.113.62:8080")
+	if err != nil {
+		t.Fatalf("GetProxyByAddress(p2) error = %v", err)
+	}
+	server.affinity.SetProxy("cool-a", p1.ID, p1.Address, "us")
+	server.affinity.SetProxy("cool-b", p2.ID, p2.Address, "jp")
+	server.affinity.SetCooldown(p1.ID, time.Now().Add(120*time.Second))
+
+	req := authenticatedJSONRequest(http.MethodGet, "/api/proxy-occupancy", "")
+	rec := httptest.NewRecorder()
+	server.routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	type occupancyRow struct {
+		ProxyID                  int64 `json:"proxy_id"`
+		CooldownRemainingSeconds int64 `json:"cooldown_remaining_seconds"`
+	}
+	var rows []occupancyRow
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatalf("decode occupancy response: %v; body=%s", err, rec.Body.String())
+	}
+	byID := make(map[int64]occupancyRow, len(rows))
+	for _, row := range rows {
+		byID[row.ProxyID] = row
+	}
+	r1, ok := byID[p1.ID]
+	if !ok {
+		t.Fatalf("missing proxy_id=%d in %#v", p1.ID, rows)
+	}
+	if r1.CooldownRemainingSeconds <= 0 || r1.CooldownRemainingSeconds > 120 {
+		t.Fatalf("p1 cooldown_remaining_seconds = %d, want in (0,120]", r1.CooldownRemainingSeconds)
+	}
+	r2, ok := byID[p2.ID]
+	if !ok {
+		t.Fatalf("missing proxy_id=%d in %#v", p2.ID, rows)
+	}
+	if r2.CooldownRemainingSeconds != 0 {
+		t.Fatalf("p2 cooldown_remaining_seconds = %d, want 0", r2.CooldownRemainingSeconds)
+	}
+}
+
+// TestProxyOccupancyAPINilStorageUsesBindingAddress 覆盖 BUG-05/BUG-08：
+// occupancy 不应依赖 s.storage（避免 nil storage panic 与 N+1 查询），
+// 地址直接取自 binding.NodeAddress。
+func TestProxyOccupancyAPINilStorageUsesBindingAddress(t *testing.T) {
+	resetWebUISecurityState()
+	sessions := affinity.New(10 * time.Minute)
+	sessions.SetProxy("sess-a", 42, "198.51.100.7:8080", "us")
+	server := New(nil, &config.Config{WebUIPort: ":0", MaxSessionsPerProxy: 3}, sessions, nil, make(chan struct{}, 1))
+
+	req := authenticatedJSONRequest(http.MethodGet, "/api/proxy-occupancy", "")
+	rec := httptest.NewRecorder()
+	server.routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	type occupancyRow struct {
+		ProxyID        int64  `json:"proxy_id"`
+		Address        string `json:"address"`
+		ActiveSessions int    `json:"active_sessions"`
+		MaxSessions    int    `json:"max_sessions"`
+	}
+	var rows []occupancyRow
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatalf("decode occupancy response: %v; body=%s", err, rec.Body.String())
+	}
+	if len(rows) != 1 {
+		t.Fatalf("len(rows) = %d, want 1: %#v", len(rows), rows)
+	}
+	if rows[0].ProxyID != 42 || rows[0].Address != "198.51.100.7:8080" || rows[0].ActiveSessions != 1 || rows[0].MaxSessions != 3 {
+		t.Fatalf("row = %#v, want proxy_id=42 address=198.51.100.7:8080 active=1 max=3", rows[0])
+	}
+}
+
 func TestRemovedContributionAPIRouteIsNotPublic(t *testing.T) {
 	server := newTestServer(t)
 	req := httptest.NewRequest(http.MethodPost, "/api/subscription/contribute", nil)

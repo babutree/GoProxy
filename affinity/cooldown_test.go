@@ -63,3 +63,36 @@ func TestCooldownConcurrent(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+
+func TestCollectExpiredRemovesUnqueriedCooldownEntries(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	store := NewWithClock(10*time.Minute, func() time.Time { return now })
+	for id := int64(1); id <= 5; id++ {
+		store.SetCooldown(id, now.Add(time.Minute))
+	}
+	now = now.Add(2 * time.Minute) // all cooldowns expired
+	// Do NOT call InCooldown/CooldownRemaining (which would lazily prune).
+	store.collectExpired()
+	if got := len(store.cooldown); got != 0 {
+		t.Fatalf("cooldown map size after collectExpired = %d, want 0", got)
+	}
+}
+
+func TestCollectExpiredKeepsActiveCooldownEntries(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	store := NewWithClock(10*time.Minute, func() time.Time { return now })
+	store.SetCooldown(1, now.Add(time.Minute))   // will expire
+	store.SetCooldown(2, now.Add(10*time.Minute)) // still active
+	now = now.Add(2 * time.Minute)
+	store.collectExpired()
+	if _, ok := store.cooldown[1]; ok {
+		t.Fatal("expired cooldown entry 1 not removed")
+	}
+	if _, ok := store.cooldown[2]; !ok {
+		t.Fatal("active cooldown entry 2 wrongly removed")
+	}
+	if !store.InCooldown(2) {
+		t.Fatal("InCooldown(2) = false, want true")
+	}
+}

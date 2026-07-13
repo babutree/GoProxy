@@ -1,0 +1,206 @@
+# 只读节点 API 设计（对外开放，API Key 鉴权）
+
+> 状态：设计稿，待评审后实现。
+> 目标：让外部程序用 API Key 拉取全部节点的 `协议 / IP / 端口 / 区域 / 纯净度 / AI 解锁 / CF 解锁` 等信息。
+> 边界：本设计只加"读"，不改选路、不改订阅转发、不改现有 WebUI 鉴权。
+
+## 1. 为什么要这个 API（问题回顾）
+
+现状核实：
+
+- 所有 `/api/*` 都过 `authMiddleware`，依赖浏览器 **session cookie + CSRF**，没有面向程序的鉴权。
+- `/api/proxies` 已含全部字段，但只服务自己的前端，程序无法用 Token 直接取。
+- 直连 `http/socks5/https` 节点本身就能被客户端**直连**，不必再经我们服务器转发；我们的价值是"采集 + 纯净度/解锁评估 + 目录"。
+- 加密订阅节点（vmess/vless/trojan/ss/hysteria2…）**必须**经 sing-box 转成本地 socks5 才能用。
+
+结论：新增一个**只读、API Key 鉴权**的出口，让程序自取节点目录；直连节点让客户端直连、加密节点仍走我们网关。
+
+## 2. 核心约束：两类节点"怎么用"不同
+
+| 类别 | `source` | 存储 `address` | 外部程序怎么用 |
+|---|---|---|---|
+| 直连节点 | manual / subscription | 真实 `IP:port` | **直连**该地址（http/socks5） |
+| 加密节点 | subscription（tunnel） | `127.0.0.1:本地端口` | **只能经我们网关**（网关 socks5/http 端口 + DSL 用户名选路） |
+
+因此 API 每个节点必须显式给出 `connect`（怎么连），不能只丢一个 `address` 让调用方猜。
+
+- `dual_protocol=true` 的节点即"本地 mixed 端口"（tunnel）。
+- `address` 以 `127.0.0.1` / `::1` 开头的即本地端口，外部不可直连。
+
+### 2.1 为什么加密节点不能"把 127.0.0.1 换成公网 IP"
+
+已从代码确认（`custom/singbox.go`）：每个加密节点的 mixed 端口只监听在 loopback：
+
+```go
+"listen": "127.0.0.1",
+"listen_port": mixedPort,
+```
+
+- 这些本地端口**只有本机进程能连**，公网 IP 上根本没有监听——把 `127.0.0.1:20001` 显示成 `<公网IP>:20001` 会给调用方一个**连不上的假地址**。
+- 若强行改成 `0.0.0.0` 让外部可直连，则这些 inbound **无鉴权**，等于对全网开放数千个无认证代理端口（灾难级安全事故）。
+
+结论（已决策）：**加密节点一律走 `mode=gateway`**——connect 指向服务器公网 IP 上的网关入口端口（7801/7802）+ DSL 用户名，经网关代理认证转发。真实服务器 IP 只用于填充网关/直连入口地址，**绝不用于伪造加密节点的本地端口**。
+
+### 2.2 服务器真实 IP 来源（已决策：出口探测 + 可配置覆盖）
+
+`connect.host` 需要一个"外部可达的服务器地址"。取值优先级：
+
+1. `config.PublicHost`（新增，可配置覆盖）——运维显式设置的域名或公网 IP，最高优先。
+2. 出口 IP 探测——复用现有 `webui/public_ip.go` 已探测到的服务器出口 IP（进程内缓存）。
+3. 兜底——请求 `Host` 头的主机名（去端口）。三者都拿不到时，`connect.host` 置空并在响应中标 `host_unresolved: true`，绝不填 `127.0.0.1`。
+
+同一来源同时用于 `mode=gateway` 的 `gateway_host` 和 `mode=direct` 节点里本身已是公网 IP 的场景（direct 节点 host 用节点自身真实 IP，不受此逻辑影响）。
+
+## 3. 鉴权：独立 API Key
+
+- 与 WebUI 密码**完全独立**，互不影响。
+- 存储：`config.json` 增加 `ReadOnlyAPIKeys []APIKey`，其中只存 key 的 **SHA-256 hash**，不落明文（与现有 `WebUIPasswordHash` 一致）。
+  ```
+  APIKey { ID string; Name string; Hash string; CreatedAt time; LastUsedAt time; Disabled bool }
+  ```
+- 传递：请求头 `Authorization: Bearer <key>` 或 `X-API-Key: <key>`。
+- 校验：常量时间比较（`crypto/subtle`），命中任一未禁用 key 即通过。
+- 生成/吊销：复用现有随机凭据逻辑；管理入口本轮先给最小实现（见 §7），首次可用环境变量 `READONLY_API_KEYS`（逗号分隔明文，仅首启导入后转存 hash）注入。
+- 只读：这些 key **只能访问 `GET /api/v1/nodes`**，不能触碰任何写接口或 WebUI 接口。
+- 限流：默认 **60 req/min/key**（令牌桶，内存），配置项 `READONLY_API_RATE_PER_MIN` 可调；命中返回 429。推荐调用方轮询间隔 **5–10 分钟**（对齐健康检查 `HealthIntervalMinutes` 默认 5，数据最快 5 分钟才变一次）——推荐间隔与硬限流是两个独立概念，硬限流仅防刷爆、不干扰正常按需拉取。
+
+## 4. 端点
+
+### `GET /api/v1/nodes`
+
+鉴权：API Key。方法：仅 GET。
+
+查询参数（全部可选，组合为 AND）：
+
+| 参数 | 含义 | 示例 |
+|---|---|---|
+| `region` | 区域码过滤（ISO alpha-2，小写） | `region=us` |
+| `protocol` | `http` / `socks5` | `protocol=socks5` |
+| `source` | `manual` / `subscription` | `source=manual` |
+| `connect` | `direct` / `gateway`（直连 vs 必须经网关） | `connect=direct` |
+| `status` | 默认只返回可用；`all` 返回含停用/失败 | `status=all` |
+| `max_abuse` | ipapi.is 滥用分上限（0–1） | `max_abuse=0.1` |
+| `cf` | `open`（未拦截）/ `blocked` | `cf=open` |
+| `ai` | 需可达的 AI，逗号分隔（openai/claude/grok/gemini） | `ai=openai,claude` |
+| `limit` / `offset` | 分页，`limit` 默认 500、上限 2000 | `limit=100` |
+
+默认（不传 `status`）：仅 `active/degraded && !user_paused && fail_count<3`，与选路口径一致。
+
+### 响应
+
+```jsonc
+{
+  "total": 1234,          // 过滤后总数（用于分页）
+  "count": 100,           // 本页条数
+  "nodes": [
+    {
+      "id": 42,
+      "protocol": "socks5",
+      "source": "manual",
+      "region": "us",
+      "region_source": "manual",
+
+      // 怎么连：direct=直连 node.host:port；gateway=经我们网关
+      "connect": {
+        "mode": "direct",
+        "host": "1.2.3.4",
+        "port": 1080,
+        "dual_protocol": false
+      },
+
+      // 出口与延迟
+      "exit_ip": "1.2.3.4",
+      "exit_location": "US / California / Santa Clara",
+      "latency_ms": 83,
+      "quality_grade": "A",
+
+      // 纯净度（原始多字段，不聚合）
+      "purity": {
+        "ipapiis_abuse_score": 0.02,   // -1=未探测
+        "ipapi_flags": ["hosting"],    // 空数组=本次无命中
+        "ipapi_flags_seen": true       // false=未探测，flags 不可信
+      },
+
+      // 解锁
+      "cf_blocked": 0,                 // -1未探测 0未拦截 1拦截
+      "ai_reachability": {             // -1未探测 0可达 1不可达；缺字段=未探测
+        "openai": 0, "claude": 1, "grok": -1, "gemini": 0
+      },
+
+      "last_check": "2026-07-12T16:21:24Z",
+      "status": "active"
+    },
+    {
+      "id": 77,
+      "protocol": "socks5",
+      "source": "subscription",
+      "region": "jp",
+      "connect": {
+        "mode": "gateway",           // 加密节点：外部不可直连
+        "host": "203.0.113.200",     // 服务器公网 IP（覆盖/探测得来；取不到则为空）
+        "gateway_socks5_port": 7801,
+        "gateway_http_port": 7802,
+        "username_hint": "acct-region-jp-session-<random>",
+        "note": "需网关代理认证；密码见部署配置。host 为空时请用部署域名/请求 Host。"
+      },
+      "exit_ip": "203.0.113.9",
+      "latency_ms": 120,
+      "purity": { "ipapiis_abuse_score": 0.0, "ipapi_flags": [], "ipapi_flags_seen": true },
+      "cf_blocked": 0,
+      "ai_reachability": { "openai": 0 },
+      "status": "active"
+    }
+  ]
+}
+```
+
+设计要点：
+
+- `connect.mode` 是调用方唯一需要看的"怎么用"开关。
+- 直连节点给 `host/port`，程序直接 `protocol://host:port` 用。
+- 加密节点**不暴露** `127.0.0.1:port`（对外无意义），改给网关端口 + DSL 用户名模板；密码不下发（安全）。
+- 纯净度保持**原始多字段**，调用方自行定阈值。
+- 未探测一律用 `-1` / `seen=false` / 缺字段表达，不伪造"干净"。
+
+## 5. 安全边界
+
+- API Key 只读，物理隔离于写接口：写接口继续走 `authMiddleware`（session+CSRF），API Key 不被 `authMiddleware` 接受，只读接口不接受 session-only 无 key 的程序访问（浏览器带 session 也可访问，方便调试）。
+- **绝不下发**：WebUI 密码、代理认证密码、API Key 明文、订阅原始 URL/凭据。
+- tunnel 节点绝不下发 `127.0.0.1:port`（避免误导 + 轻微信息泄露）。
+- key hash 存储，明文只在创建时返回一次。
+- 限流防拉爆；`LastUsedAt` 记录便于吊销排查。
+
+## 6. TDD 测试矩阵（实现阶段）
+
+storage：
+- `TestListNodesForAPIAppliesFilters`：region/protocol/source/cf/ai/max_abuse 组合过滤正确。
+- `TestListNodesForAPIStatusDefaultExcludesUnusable` 与 `status=all` 对比。
+- `TestListNodesForAPIPaginationStable`：limit/offset 稳定序（latency,id）。
+
+webui（api key）：
+- `TestReadOnlyAPIRejectsMissingOrBadKey` → 401。
+- `TestReadOnlyAPIAcceptsValidKey` → 200。
+- `TestReadOnlyAPIKeyCannotAccessWriteEndpoints` → 401/403（key 不得写）。
+- `TestReadOnlyAPIRateLimited` → 429。
+- `TestReadOnlyAPINeverLeaksSecrets`：响应不含密码/URL/明文 key/`127.0.0.1`。
+- `TestNodesAPITunnelNodeReportsGatewayConnect`：加密节点 `connect.mode=gateway` 且无 `127.0.0.1`。
+- `TestNodesAPIDirectNodeReportsDirectConnect`：直连节点 `connect.mode=direct` 且 host=真实 IP。
+
+config：
+- `TestReadOnlyAPIKeyHashRoundTrip`：明文不落盘、hash 校验通过、禁用 key 失效。
+
+## 7. 实现分期
+
+- **阶段 A（本轮实现，全套 TDD + 回归）**：
+  - config：`APIKey` 结构（ID/Name/Hash/CreatedAt/LastUsedAt/Disabled）+ hash 存取 + `READONLY_API_KEYS` 首启导入 + `PublicHost`/`PUBLIC_HOST` 覆盖 + `READONLY_API_RATE_PER_MIN`。
+  - storage：`ListNodesForAPI(filter)` 过滤 + 稳定分页。
+  - webui 只读：`apiKeyMiddleware`、`GET /api/v1/nodes`、`connect` 视图组装（direct/gateway）、限流、脱敏。
+  - webui 管理：API Key 写接口（创建返回一次性明文 / 命名 / 吊销·禁用 / 列出含 LastUsed，均走 session+CSRF）+ 前端 UI（设置页新增「API 密钥」区块）。
+- **阶段 B（后续，可选）**：Key 过期时间、按 Key 的用量统计、IP allowlist。
+
+## 8. 不做 / 明确排除
+
+- 不做 API Key 的写权限。
+- 不改选路、订阅转发、现有 session 鉴权。
+- 不暴露加密节点本地端口。
+- 不聚合纯净度为单一分值（保持原始多字段）。

@@ -1,7 +1,6 @@
 package webui
 
 import (
-	"log"
 	"net/http"
 )
 
@@ -58,20 +57,16 @@ func (s *Server) apiProxyOccupancy(w http.ResponseWriter, _ *http.Request) {
 	if s.cfg != nil {
 		maxSessions = s.cfg.MaxSessionsPerProxy
 	}
+	// 使用聚合阶段已记录的 binding.NodeAddress，避免逐节点 GetProxyByID 的 N+1 查询，
+	// 同时消除对 s.storage 的依赖（occupancy 快照的地址即绑定时的节点地址）。
 	rows := make([]proxyOccupancyRow, 0, len(counts))
 	for proxyID, active := range counts {
-		addr := addressByID[proxyID]
-		if p, err := s.storage.GetProxyByID(proxyID); err == nil && p != nil {
-			addr = p.Address
-		} else if err != nil {
-			log.Printf("[webui] proxy occupancy lookup id=%d: %v", proxyID, err)
-		}
 		rows = append(rows, proxyOccupancyRow{
 			ProxyID:                  proxyID,
-			Address:                  addr,
+			Address:                  addressByID[proxyID],
 			ActiveSessions:           active,
 			MaxSessions:              maxSessions,
-			CooldownRemainingSeconds: 0, // #15 not merged
+			CooldownRemainingSeconds: int64(s.affinity.CooldownRemaining(proxyID).Seconds()),
 		})
 	}
 	jsonOK(w, rows)

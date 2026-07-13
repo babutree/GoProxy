@@ -11,7 +11,7 @@
 
 - **会话占用上限**（可选）：max_sessions_per_proxy / MAX_SESSIONS_PER_PROXY，默认 0 不限制；>0 时新 session 绑定受每节点上限约束
 - **代理节点冷却 CD**（可选）：proxy_cooldown_minutes / PROXY_COOLDOWN_MINUTES，默认 0 关闭；>0 时新 session 首次绑定后，冷却期内其他新 session 不选该节点；同 session 粘性不受影响；无 session 的 Pick 忽略冷却
-- **节点占用可观测 API**：已认证 `GET /api/proxy-occupancy` 返回每节点 `proxy_id` / `address` / `active_sessions` / `max_sessions` / `cooldown_remaining_seconds`（#15 未合入时冷却为 0）；无密码字段
+- **节点占用可观测 API**：已认证 `GET /api/proxy-occupancy` 返回每节点 `proxy_id` / `address` / `active_sessions` / `max_sessions` / `cooldown_remaining_seconds`（返回真实冷却剩余秒数）；无密码字段
 
 - **sing-box 分片多进程**
   - `ShardedSingBox` 将隧道节点按稳定哈希切到 N 个独立进程（默认 4，可配置）
@@ -29,9 +29,17 @@
   - 订阅自定义请求头（含 User-Agent），用于对默认 UA 返回 401 的订阅源
   - 内网/本地目标直连 bypass（HTTP / CONNECT / SOCKS5）
   - 代理密码可持久化并经已认证 config API 下发，支持前端拼完整 URL
+- **批量导入手工节点**：WebUI「批量导入」与 `POST /api/manual-node/import`；支持多行 `socks5://`/`http://`/`https://`（行尾注释自动剥离），导入前批内去重、跳过已存在 manual 节点，返回 added/skipped/failed 报告
+- **节点多选批量删除**：列表勾选 + `POST /api/manual-node/batch-delete`；来源筛选（手工/订阅）
 
 ### 修复
 
+- 会话首绑/换绑：容量与冷却检查与写入串行化，并发首绑不再突破 `max_sessions_per_proxy`，冷却也原子生效；同 session 并发 Resolve 不会拆成多节点
+- 手动隧道节点：Reload 成功后 DB 写失败会回滚运行态；删除手工隧道节点同步移出 sing-box（统一走 Manager，通用删除接口不再旁路）
+- 订阅刷新：删除旧代理失败时返回错误，不再继续半刷新/假成功
+- 分片 Reload：后续分片失败时回滚已变更分片；补偿失败聚合报告
+- WebUI 同址歧义地址映射为 409（不再一律 404）
+- GetByRegion 去掉冗余 SQL `RANDOM()`，改为确定性排序
 - 不完整/Partial 重载不再删除旧订阅代理；分片 Partial 纳入健康恢复
 - 订阅删除仅走存储事务；headers 非法 JSON 在添加时拒绝
 - dual_protocol 置位失败不再静默成功；端口空洞可复用

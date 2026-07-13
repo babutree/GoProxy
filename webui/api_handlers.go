@@ -2,8 +2,10 @@ package webui
 
 import (
 	"database/sql"
+	"errors"
 	"log"
 	"net/http"
+	"strings"
 
 	"goproxy/config"
 	"goproxy/logger"
@@ -93,8 +95,33 @@ func (s *Server) apiDeleteProxy(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-	var err error
+	// Resolve identity so manual tunnel deletes go through Manager (runtime + DB).
+	var proxy *storage.Proxy
+	var lookupErr error
 	if req.ID > 0 {
+		proxy, lookupErr = s.storage.GetProxyByID(req.ID)
+	} else {
+		proxy, lookupErr = s.storage.GetProxyByAddress(req.Address)
+	}
+	if lookupErr != nil {
+		// Missing identity is treated as already deleted (idempotent delete).
+		if lookupErr == sql.ErrNoRows || strings.Contains(lookupErr.Error(), "not found") {
+			jsonOK(w, map[string]string{"status": "deleted"})
+			return
+		}
+		if errors.Is(lookupErr, storage.ErrAmbiguousProxyAddress) || strings.Contains(lookupErr.Error(), "ambiguous") {
+			jsonError(w, "ambiguous proxy address; use id", http.StatusConflict)
+			return
+		}
+		log.Printf("[webui] delete proxy lookup failed: id=%d address=%q err=%v", req.ID, req.Address, lookupErr)
+		jsonError(w, "failed to delete proxy", http.StatusInternalServerError)
+		return
+	}
+
+	var err error
+	if proxy.Source == storage.SourceManual && s.customMgr != nil {
+		err = s.customMgr.DeleteManualNode(proxy.ID)
+	} else if req.ID > 0 {
 		err = s.storage.DeleteProxyByID(req.ID)
 	} else {
 		err = s.storage.Delete(req.Address)

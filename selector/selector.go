@@ -24,6 +24,10 @@ const sessionSpreadTopK = 5
 
 var ErrNoNode = errors.New("no available node")
 
+// afterFirstBindPickHook is a test-only seam: when set, Resolve invokes it after
+// pickForSession returns a candidate and before the bind write. Production leaves it nil.
+var afterFirstBindPickHook func()
+
 type Store interface {
 	GetByRegion(region string, excludes []int64) ([]storage.Proxy, error)
 	GetProxyByID(id int64) (*storage.Proxy, error)
@@ -46,15 +50,30 @@ func Resolve(store Store, sessions *affinity.Store, route auth.ParsedUsername, e
 	if route.Session == "" {
 		return Pick(store, route.Region, excludes)
 	}
-	proxy, rebindRegion := resolveBoundProxy(store, sessions, route, excludes)
-	if proxy != nil {
+	// Sticky fast path: no first-bind lock (read + refresh only).
+	if proxy, ok := stickyBoundProxy(store, sessions, route, excludes); ok {
 		return proxy, nil
 	}
+	if sessions == nil {
+		return pickForSession(store, nil, route.Region, route.Session, excludes, maxSessionsPerProxy(), proxyCooldownMinutes())
+	}
+
+	// First-bind / rebind: serialize check + occupancy release + pick + write.
+	sessions.BeginFirstBind()
+	defer sessions.EndFirstBind()
+
+	if proxy, ok := stickyBoundProxy(store, sessions, route, excludes); ok {
+		return proxy, nil
+	}
+	rebindRegion := releaseStaleBinding(sessions, route, excludes)
 	maxSessions := maxSessionsPerProxy()
 	cooldownMinutes := proxyCooldownMinutes()
 	proxy, err := pickForSession(store, sessions, rebindRegion, route.Session, excludes, maxSessions, cooldownMinutes)
 	if err != nil {
 		return nil, err
+	}
+	if afterFirstBindPickHook != nil {
+		afterFirstBindPickHook()
 	}
 	sessions.SetProxy(route.Session, proxy.ID, proxy.Address, proxy.Region)
 	if cooldownMinutes > 0 {
@@ -182,23 +201,41 @@ func hashString(s string) uint32 {
 	return h.Sum32()
 }
 
-func resolveBoundProxy(store Store, sessions *affinity.Store, route auth.ParsedUsername, excludes []int64) (*storage.Proxy, string) {
+// stickyBoundProxy returns a live, region-matching binding without mutating occupancy.
+// Callers that need rebind must use releaseStaleBinding under the first-bind lock.
+func stickyBoundProxy(store Store, sessions *affinity.Store, route auth.ParsedUsername, excludes []int64) (*storage.Proxy, bool) {
+	if sessions == nil {
+		return nil, false
+	}
 	binding, ok := sessions.Get(route.Session)
 	if !ok {
-		return nil, route.Region
+		return nil, false
 	}
-	rebindRegion := requestedOrBoundRegion(route.Region, binding.Region)
 	if binding.ProxyID <= 0 || excluded(binding.ProxyID, excludes) || bindingRegionMismatch(binding, route.Region) {
-		// Release occupancy before first-bind / rebind so self does not consume quota.
-		sessions.Remove(route.Session)
-		return nil, rebindRegion
+		return nil, false
 	}
 	proxy, err := store.GetProxyByID(binding.ProxyID)
 	if err != nil || proxy == nil || !proxyAvailable(*proxy) || regionMismatch(proxy.Region, route.Region) {
-		sessions.Remove(route.Session)
-		return nil, rebindRegion
+		return nil, false
 	}
-	return proxy, rebindRegion
+	return proxy, true
+}
+
+// releaseStaleBinding drops a non-sticky binding so its occupancy does not block rebind.
+// Must run under first-bind serialization.
+func releaseStaleBinding(sessions *affinity.Store, route auth.ParsedUsername, excludes []int64) string {
+	binding, ok := sessions.Get(route.Session)
+	if !ok {
+		return route.Region
+	}
+	rebindRegion := requestedOrBoundRegion(route.Region, binding.Region)
+	if binding.ProxyID <= 0 || excluded(binding.ProxyID, excludes) || bindingRegionMismatch(binding, route.Region) {
+		sessions.Remove(route.Session)
+		return rebindRegion
+	}
+	// Binding exists but stickyBoundProxy already rejected it (dead node / region).
+	sessions.Remove(route.Session)
+	return rebindRegion
 }
 
 func availableProxies(proxies []storage.Proxy) []storage.Proxy {

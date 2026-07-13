@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -300,7 +301,11 @@ func (m *Manager) RefreshSubscription(subID int64) error {
 	}
 
 	// 到这里才替换该订阅代理：拉取/解析/隧道重载失败都不会破坏旧可用配置。
-	oldDeleted, _ := m.storage.DeleteBySubscriptionID(subID)
+	// 删除失败必须返回错误，禁止继续插入/标记 fetch 成功（半刷新）。
+	oldDeleted, delErr := m.storage.DeleteBySubscriptionID(subID)
+	if delErr != nil {
+		return fmt.Errorf("删除订阅旧代理失败: %w", delErr)
+	}
 	if oldDeleted > 0 {
 		log.Printf("[custom] 🧹 清理订阅 [%s] 旧代理 %d 个", sub.Name, oldDeleted)
 	}
@@ -727,6 +732,61 @@ func (m *Manager) GetSingBox() singBoxShard {
 	return m.singbox
 }
 
+// DeleteManualNode removes a manual proxy by id.
+// Direct nodes are DB-only. Tunnel nodes also leave the sing-box runtime.
+func (m *Manager) DeleteManualNode(id int64) error {
+	proxy, err := m.storage.GetProxyByID(id)
+	if err != nil {
+		return fmt.Errorf("查找节点失败: %w", err)
+	}
+	if proxy.Source != storage.SourceManual {
+		return fmt.Errorf("仅支持删除手工节点")
+	}
+	if !isLocalTunnelAddress(proxy.Address) {
+		if err := m.storage.DeleteProxyByID(id); err != nil {
+			return fmt.Errorf("删除节点失败: %w", err)
+		}
+		return nil
+	}
+
+	m.refreshMu.Lock()
+	defer m.refreshMu.Unlock()
+
+	oldNodes := append([]ParsedNode(nil), m.singbox.GetNodes()...)
+	removeKey := nodeKeyForLocalAddress(oldNodes, m.singbox.GetPortMap(), proxy.Address)
+	newNodes := make([]ParsedNode, 0, len(oldNodes))
+	for _, n := range oldNodes {
+		if removeKey != "" && n.NodeKey() == removeKey {
+			continue
+		}
+		// Also drop by matching local port when key resolution fails.
+		if removeKey == "" && localAddrMatches(m.singbox.GetPortMap(), n.NodeKey(), proxy.Address) {
+			continue
+		}
+		newNodes = append(newNodes, n)
+	}
+	if err := m.singbox.Reload(newNodes); err != nil {
+		return fmt.Errorf("sing-box 重载失败: %w", err)
+	}
+	if err := m.storage.DeleteProxyByID(id); err != nil {
+		if rbErr := m.singbox.Reload(oldNodes); rbErr != nil {
+			return fmt.Errorf("删除节点失败: %w; 回滚运行态失败: %v", err, rbErr)
+		}
+		return fmt.Errorf("删除节点失败: %w", err)
+	}
+	return nil
+}
+
+// ManualImportResult summarizes batch import of direct manual proxies.
+type ManualImportResult struct {
+	Total      int      `json:"total"`
+	Added      int      `json:"added"`
+	Skipped    int      `json:"skipped"`
+	Failed     int      `json:"failed"`
+	Errors     []string `json:"errors,omitempty"`
+	AddedAddrs []string `json:"added_addrs,omitempty"`
+}
+
 // AddManualNode 从单个链接添加人工节点，存储为 source=manual。
 // 直连节点（http/socks5）直接入库；加密节点通过 sing-box 转换为本地 socks5 后入库。
 func (m *Manager) AddManualNode(link, region, note string) error {
@@ -747,11 +807,84 @@ func (m *Manager) AddManualNode(link, region, note string) error {
 	return m.addManualTunnelNode(node, region, note)
 }
 
+// ImportManualLinks parses multi-line proxy text (scheme://host:port, optional
+// trailing annotations stripped at first whitespace) and upserts direct nodes.
+// Tunnel/encrypted links are reported as failures in this batch path (use single add).
+// Existing identical address+source manual rows are counted as skipped.
+func (m *Manager) ImportManualLinks(text, region, note string) (ManualImportResult, error) {
+	var result ManualImportResult
+	seen := map[string]bool{}
+	lines := strings.Split(text, "\n")
+	var toAdd []storage.Proxy
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		result.Total++
+		link := line
+		if i := strings.IndexAny(line, " \t"); i > 0 {
+			link = line[:i]
+		}
+		node, err := ParseSingleLink(link)
+		if err != nil {
+			result.Failed++
+			if len(result.Errors) < 20 {
+				result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", link, err))
+			}
+			continue
+		}
+		if !node.IsDirect() {
+			result.Failed++
+			if len(result.Errors) < 20 {
+				result.Errors = append(result.Errors, fmt.Sprintf("%s: batch import supports only http/socks5 direct links", link))
+			}
+			continue
+		}
+		addr := node.DirectAddress()
+		key := addr + "|" + node.DirectProtocol()
+		if seen[key] {
+			result.Skipped++
+			continue
+		}
+		seen[key] = true
+		// Skip if already present as manual.
+		if existing, err := m.storage.GetProxyByIdentity(addr, storage.SourceManual, 0); err == nil && existing != nil {
+			result.Skipped++
+			continue
+		}
+		toAdd = append(toAdd, storage.Proxy{Address: addr, Protocol: node.DirectProtocol()})
+		result.AddedAddrs = append(result.AddedAddrs, addr)
+	}
+	if len(toAdd) == 0 {
+		return result, nil
+	}
+	if err := m.storage.AddManualProxies(toAdd, region, note); err != nil {
+		return result, fmt.Errorf("批量写入失败: %w", err)
+	}
+	result.Added = len(toAdd)
+	return result, nil
+}
+
+// DeleteManualNodes deletes multiple manual proxies by id, using DeleteManualNode.
+func (m *Manager) DeleteManualNodes(ids []int64) (deleted int, errs []string) {
+	for _, id := range ids {
+		if err := m.DeleteManualNode(id); err != nil {
+			errs = append(errs, fmt.Sprintf("id=%d: %v", id, err))
+			continue
+		}
+		deleted++
+	}
+	return deleted, errs
+}
+
 // addManualTunnelNode 处理加密节点：合并进现有 sing-box 节点集后重载，取本地端口入库。
+// DB 写入失败时补偿回滚到旧运行态，避免幽灵节点。
 func (m *Manager) addManualTunnelNode(node *ParsedNode, region, note string) error {
 	m.refreshMu.Lock()
 	defer m.refreshMu.Unlock()
 
+	oldNodes := append([]ParsedNode(nil), m.singbox.GetNodes()...)
 	mergedNodes := m.mergeWithExistingTunnelNodes(node)
 	if err := m.singbox.Reload(mergedNodes); err != nil {
 		return fmt.Errorf("sing-box 重载失败: %w", err)
@@ -760,6 +893,9 @@ func (m *Manager) addManualTunnelNode(node *ParsedNode, region, note string) err
 	key := node.NodeKey()
 	socksPort, ok := m.singbox.GetPortMap()[key]
 	if !ok {
+		if rbErr := m.singbox.Reload(oldNodes); rbErr != nil {
+			return fmt.Errorf("sing-box 未为节点 %s 分配本地端口; 回滚运行态失败: %v", key, rbErr)
+		}
 		return fmt.Errorf("sing-box 未为节点 %s 分配本地端口", key)
 	}
 
@@ -767,18 +903,70 @@ func (m *Manager) addManualTunnelNode(node *ParsedNode, region, note string) err
 	// 入库为单条 socks5 记录。前端复制时可按需以 socks5:// 或 http:// scheme 呈现同一 IP:port。
 	mixedAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(socksPort))
 	if err := m.storage.AddManualProxy(mixedAddr, "socks5", region, note); err != nil {
+		if rbErr := m.singbox.Reload(oldNodes); rbErr != nil {
+			return fmt.Errorf("存储人工节点入站失败: %w; 回滚运行态失败: %v", err, rbErr)
+		}
 		return fmt.Errorf("存储人工节点入站失败: %w", err)
 	}
 	// 手动加密节点是 mixed 端口（单端口同时服务 SOCKS5+HTTP），显式置位 dual_protocol，
 	// 供前端可靠渲染双协议标签，而非靠地址长相猜测。
 	p, err := m.storage.GetProxyByAddress(mixedAddr)
 	if err != nil {
+		_ = m.storage.DeleteManualProxy(mixedAddr)
+		if rbErr := m.singbox.Reload(oldNodes); rbErr != nil {
+			return fmt.Errorf("读取手动节点 %s 失败: %w; 回滚运行态失败: %v", mixedAddr, err, rbErr)
+		}
 		return fmt.Errorf("读取手动节点 %s 失败: %w", mixedAddr, err)
 	}
 	if err := m.storage.SetProxyDualProtocol(p.ID, true); err != nil {
+		_ = m.storage.DeleteProxyByID(p.ID)
+		if rbErr := m.singbox.Reload(oldNodes); rbErr != nil {
+			return fmt.Errorf("置位手动节点 dual_protocol 失败: %w; 回滚运行态失败: %v", err, rbErr)
+		}
 		return fmt.Errorf("置位手动节点 dual_protocol 失败: %w", err)
 	}
 	return nil
+}
+
+func isLocalTunnelAddress(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return host == "127.0.0.1" || host == "localhost" || (ip != nil && ip.IsLoopback())
+}
+
+func localAddrMatches(portMap map[string]int, key, address string) bool {
+	port, ok := portMap[key]
+	if !ok {
+		return false
+	}
+	return net.JoinHostPort("127.0.0.1", strconv.Itoa(port)) == address ||
+		net.JoinHostPort("localhost", strconv.Itoa(port)) == address
+}
+
+func nodeKeyForLocalAddress(nodes []ParsedNode, portMap map[string]int, address string) string {
+	for _, n := range nodes {
+		if localAddrMatches(portMap, n.NodeKey(), address) {
+			return n.NodeKey()
+		}
+	}
+	// Fallback: match port only.
+	_, portStr, err := net.SplitHostPort(address)
+	if err != nil {
+		return ""
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return ""
+	}
+	for key, p := range portMap {
+		if p == port {
+			return key
+		}
+	}
+	return ""
 }
 
 // mergeWithExistingTunnelNodes 将人工节点合并进现有订阅 tunnel 节点集，按 NodeKey 去重，
