@@ -324,7 +324,7 @@ func TestConfigSaveCannotRestoreConcurrentlyRevokedAPIKey(t *testing.T) {
 
 	configDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
-		req := httptest.NewRequest(http.MethodPost, "/api/config/save", strings.NewReader(`{"proxy_auth_enabled":true,"proxy_auth_username":"acct","proxy_auth_password":"","session_ttl_minutes":10,"default_region":"","health_check_interval":5,"max_retry":3,"singbox_path":"sing-box","allowed_countries":[],"blocked_countries":[]}`))
+		req := httptest.NewRequest(http.MethodPost, "/api/config/save", strings.NewReader(`{"proxy_auth_enabled":true,"proxy_auth_username":"username","proxy_auth_password":"","session_ttl_minutes":10,"default_region":"","health_check_interval":5,"max_retry":3,"singbox_path":"sing-box","allowed_countries":[],"blocked_countries":[]}`))
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 		server.apiConfigSave(rec, req)

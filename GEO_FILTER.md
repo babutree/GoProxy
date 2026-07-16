@@ -34,9 +34,9 @@ Saved WebUI settings are stored in `config.json` under `DATA_DIR` and override e
 Proxy authentication usernames may include these suffixes:
 
 ```text
-acct-region-us
-acct-session-browser
-acct-region-jp-session-app01
+username-region-us
+username-session-browser
+username-region-jp-session-app01
 ```
 
 Rules:

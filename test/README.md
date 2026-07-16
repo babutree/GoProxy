@@ -19,7 +19,7 @@
 **HTTP 代理测试**（探测出口 IP）：
 ```bash
 # 先填入首次启动日志或 WebUI Settings 中的实际代理认证信息；不要把密码写入脚本。
-export GOPROXY_AUTH_USERNAME=acct
+export GOPROXY_AUTH_USERNAME=username
 export GOPROXY_AUTH_PASSWORD='replace-with-your-proxy-password'
 
 # 测试 HTTP 代理端口（默认 7802）
@@ -87,14 +87,14 @@ python test/test_proxy.py 7802
 3. 实时输出成功/失败与延迟
 4. 按 `Ctrl+C` 停止并打印统计摘要
 
-可选路由参数：设置 `GOPROXY_AUTH_REGION=us` 会把认证用户名扩展为 `acct-region-us`，设置 `GOPROXY_AUTH_SESSION=browser` 会追加 `-session-browser`。只在环境变量中提供真实密码，不要写入仓库文件。
+可选路由参数：设置 `GOPROXY_AUTH_REGION=us` 会把认证用户名扩展为 `username-region-us`，设置 `GOPROXY_AUTH_SESSION=browser` 会追加 `-session-browser`。只在环境变量中提供真实密码，不要写入仓库文件。
 
 ## 🔀 测试不同协议端口
 
 ### HTTP 代理
 
 ```bash
-export GOPROXY_AUTH_USERNAME=acct
+export GOPROXY_AUTH_USERNAME=username
 export GOPROXY_AUTH_PASSWORD='replace-with-your-proxy-password'
 ./test/test_proxy.sh 7802
 ./test/test_http_https.sh 7802
@@ -107,7 +107,7 @@ export GOPROXY_AUTH_PASSWORD='replace-with-your-proxy-password'
 ### SOCKS5 代理
 
 ```bash
-export GOPROXY_AUTH_USERNAME=acct
+export GOPROXY_AUTH_USERNAME=username
 export GOPROXY_AUTH_PASSWORD='replace-with-your-proxy-password'
 ./test/test_socks5.sh 7801
 ```

@@ -8,7 +8,7 @@
 ### 
 
 # GoProxy SOCKS5 代理测试脚本
-# 用法: GOPROXY_AUTH_USERNAME=acct GOPROXY_AUTH_PASSWORD=... ./test_socks5.sh [端口号，默认7801]
+# 用法: GOPROXY_AUTH_USERNAME=username GOPROXY_AUTH_PASSWORD=... ./test_socks5.sh [端口号，默认7801]
 # 可选: GOPROXY_AUTH_REGION=us GOPROXY_AUTH_SESSION=browser
 
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"

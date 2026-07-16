@@ -3,7 +3,9 @@ package selector
 import (
 	"errors"
 	"testing"
+	"time"
 
+	"goproxy/affinity"
 	"goproxy/auth"
 	"goproxy/storage"
 )
@@ -65,13 +67,33 @@ func TestStickyBindingRejectedWhenUnlockNoLongerMatches(t *testing.T) {
 		{ID: 1, Address: "old:1", Region: "us", Latency: 5, Status: "active", AIReachability: `{"openai":1}`, CFBlocked: 0},
 		{ID: 2, Address: "ok:1", Region: "us", Latency: 20, Status: "active", AIReachability: `{"openai":0}`, CFBlocked: 0},
 	}}
-	// sticky would prefer id=1, but unlock gpt requires openai=0 → rebind to id=2
-	// use Resolve without sessions first for unlock pick path
-	proxy, err := Resolve(store, nil, auth.ParsedUsername{Region: "us", Unlock: []string{"openai"}}, []int64{1})
+	// 真 sticky 路径：预绑 id=1，但 unlock openai 不满足 → 释放并 rebind 到 id=2
+	sessions := affinity.NewWithClock(10*time.Minute, time.Now)
+	sessions.SetProxy("sess-unlock", 1, "old:1", "us")
+	proxy, err := Resolve(store, sessions, auth.ParsedUsername{Session: "sess-unlock", Region: "us", Unlock: []string{"openai"}}, nil)
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
 	if proxy.Address != "ok:1" {
-		t.Fatalf("Resolve() = %s, want ok:1", proxy.Address)
+		t.Fatalf("Resolve() = %s, want ok:1 after sticky unlock reject", proxy.Address)
+	}
+	if binding, ok := sessions.Get("sess-unlock"); !ok || binding.ProxyID != 2 {
+		t.Fatalf("sticky rebind = %+v ok=%v, want proxy_id=2", binding, ok)
+	}
+}
+
+func TestStickyBindingKeepsWhenUnlockStillMatches(t *testing.T) {
+	store := fakeStore{proxies: []storage.Proxy{
+		{ID: 1, Address: "ok:1", Region: "us", Latency: 5, Status: "active", AIReachability: `{"openai":0}`, CFBlocked: 0},
+		{ID: 2, Address: "other:1", Region: "us", Latency: 1, Status: "active", AIReachability: `{"openai":0}`, CFBlocked: 0},
+	}}
+	sessions := affinity.NewWithClock(10*time.Minute, time.Now)
+	sessions.SetProxy("sess-keep", 1, "ok:1", "us")
+	proxy, err := Resolve(store, sessions, auth.ParsedUsername{Session: "sess-keep", Region: "us", Unlock: []string{"openai"}}, nil)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if proxy.ID != 1 || proxy.Address != "ok:1" {
+		t.Fatalf("Resolve() = %#v, want sticky keep id=1", proxy)
 	}
 }

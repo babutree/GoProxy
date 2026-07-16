@@ -116,7 +116,7 @@ func DefaultConfig() *Config {
 		SOCKS5Port:             envPort("SOCKS5_PORT", ":7801"),
 		WebUIPort:              envPort("WEBUI_PORT", ":7800"),
 		ProxyAuthEnabled:       true,
-		ProxyAuthUsername:      "acct",
+		ProxyAuthUsername:      "username",
 		SessionTTLMinutes:      envInt("SESSION_TTL_MINUTES", 10),
 		MaxSessionsPerProxy:    envIntNonNegative("MAX_SESSIONS_PER_PROXY", 0),
 		ProxyCooldownMinutes:   envIntNonNegative("PROXY_COOLDOWN_MINUTES", 0),
@@ -188,7 +188,7 @@ func bootstrapCredentials(cfg *Config) {
 	}
 	if cfg.ProxyAuthPasswordHash == "" {
 		if cfg.ProxyAuthUsername == "" {
-			cfg.ProxyAuthUsername = "acct"
+			cfg.ProxyAuthUsername = "username"
 		}
 		info.ProxyAuthUsername = cfg.ProxyAuthUsername
 		info.ProxyAuthPassword = generateCredential()

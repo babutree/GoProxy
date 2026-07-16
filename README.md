@@ -40,7 +40,7 @@ authentication credentials, and prints them **once** to the container log:
 docker compose logs | grep "首次启动"
 ```
 
-Save those credentials, then open the WebUI at `http://localhost:7800` and log
+Save those credentials, then open the WebUI at `http://YOUR-HOST-IP:7800` and log
 in. You can change all credentials later under **Settings**. The credentials are
 persisted (hashed for the WebUI password) in `config.json` inside the data
 volume; they are not shown again on later restarts.
@@ -63,7 +63,7 @@ $env:GOPROXY="https://goproxy.cn,direct"
 
 ## Proxy Authentication And Username DSL
 
-Proxy authentication is enabled by default. The base username (default `acct`)
+Proxy authentication is enabled by default. The base username (default `username`)
 and password are auto-generated on first boot and printed once to the log; the
 password is stored in `config.json`. Change them in the WebUI **Settings** page.
 
@@ -84,40 +84,36 @@ client's proxy-username field.
 The full username has the form (**fixed order**):
 
 ```
-<base>[-region-<cc>][-unlock-<token>][-session-<id>]
+<base>[-region-<cc>][-session-<id>]
 ```
 
 Suffixes are optional, but when present they must appear in this order:
-`region` → `unlock` → `session`. A wrong order fails **username parsing**, so
+`region` → `session`. A wrong order fails **username parsing**, so
 authentication fails even if the base password is correct.
 
-For example, `acct-region-jp-unlock-gpt-session-browser` is parsed as:
+For example, `username-region-jp-session-browser` is parsed as:
 
 | Part | Value | Role |
 |------|-------|------|
-| base | `acct` | Must equal the configured proxy username (default `acct`, editable in Settings). This is the only part checked against the credential. |
+| base | `username` | Must equal the configured proxy username (default `username`, editable in Settings). This is the only part checked against the credential. |
 | region | `jp` | Selects a `jp` region node. |
-| unlock | `gpt` | Require OpenAI-reachable nodes (`openai` AI probe = 0). |
 | session | `browser` | Sticky key: same key reuses the same exit node within the TTL. |
 
 Only the **base** takes part in password authentication (base must equal the
 configured proxy username, and the password must equal the configured proxy
-password). The `-region-`, `-unlock-`, and `-session-` parts are routing hints,
-not credentials.
+password). The `-region-` and `-session-` parts are routing hints, not
+credentials.
 
 ### Username forms
 
 | Username | Meaning |
 |----------|---------|
-| `acct` | Authenticate as `acct`; use any available node. |
-| `acct-region-us` | Use an available `us` region node. |
-| `acct-unlock-gpt` | Use a node whose OpenAI probe is reachable. |
-| `acct-unlock-cf` | Use a node with Cloudflare not blocked. |
-| `acct-unlock-all` | Require OpenAI + Claude + Grok + Gemini + CF all open. |
-| `acct-session-browser` | Bind session key `browser` to one node for the configured TTL. |
-| `acct-region-jp-unlock-gpt-session-app01` | `jp` + OpenAI unlock + sticky session `app01`. |
+| `username` | Authenticate as `username`; use any available node. |
+| `username-region-us` | Use an available `us` region node. |
+| `username-session-browser` | Bind session key `browser` to one node for the configured TTL. |
+| `username-region-jp-session-app01` | `jp` region + sticky session `app01`. |
 
-> Replace `acct` with the configured proxy username (default `acct`, editable in
+> Replace `username` with the configured proxy username (default `username`, editable in
 > the WebUI Settings). If your base username is `myuser`, the strings become
 > `myuser-region-us`, etc. The base prefix is fixed by config; the suffixes are
 > chosen per request.
@@ -151,42 +147,14 @@ not credentials.
   exit IPs and do not interfere with each other. Change the key to deliberately
   rotate the exit.
 
-### The unlock filter (AI / CF)
-
-- Optional suffix `-unlock-<token>` restricts routing to nodes that already have
-  matching probe results stored on the node (`ai_reachability` / `cf_blocked`).
-- Allowed tokens (aliases normalized server-side):
-
-  | Token | Requirement |
-  |-------|-------------|
-  | `gpt` / `openai` / `chatgpt` | `ai_reachability.openai == 0` |
-  | `claude` | `ai_reachability.claude == 0` |
-  | `gemini` | `ai_reachability.gemini == 0` |
-  | `grok` | `ai_reachability.grok == 0` |
-  | `cf` / `cloudflare` | `cf_blocked == 0` |
-  | `all` | all five of the above (AND) |
-
-- Combine multiple requirements in one unlock segment with `+` or `,`
-  (e.g. `-unlock-gpt+cf`). Only **one** `-unlock-` segment is allowed.
-- Unprobed (`-1`) or blocked (`1`) does **not** match. If no node satisfies the
-  filter, the request fails with no available node (no silent fallback).
-- Order is fixed: `-unlock-` must come **after** optional `-region-` and
-  **before** optional `-session-`.
-
 ## Using The Proxy
 
-The examples below use the base username `acct` and password `change-me` as placeholders. Replace them with your actual credentials (the auto-generated proxy password shown once in the logs on first boot, or whatever you later set in the WebUI). Proxy authentication is enabled by default.
+The examples below use the base username `username` and password `password` as placeholders. Replace them with your actual credentials (the auto-generated proxy password shown once in the logs on first boot, or whatever you later set in the WebUI). Proxy authentication is enabled by default.
 
 ### HTTP proxy (plain HTTP target)
 
 ```bash
-curl -x http://acct-region-us:change-me@localhost:7802 http://example.com/
-```
-
-Only OpenAI-unlocked nodes:
-
-```bash
-curl -x http://acct-unlock-gpt:change-me@localhost:7802 https://www.gstatic.com/generate_204
+curl -x http://username-region-us:password@YOUR-HOST-IP:7802 http://example.com/
 ```
 
 ### HTTP proxy (HTTPS target, via CONNECT tunnel)
@@ -194,7 +162,7 @@ curl -x http://acct-unlock-gpt:change-me@localhost:7802 https://www.gstatic.com/
 An HTTPS target goes through the proxy as a `CONNECT` tunnel. The proxy credentials are sent in the `Proxy-Authorization` header; the DSL suffix stays in the username.
 
 ```bash
-curl -x http://acct-region-us:change-me@localhost:7802 https://www.gstatic.com/generate_204
+curl -x http://username-region-us:password@YOUR-HOST-IP:7802 https://www.gstatic.com/generate_204
 ```
 
 ### SOCKS5 proxy (works for both HTTP and HTTPS targets)
@@ -203,19 +171,16 @@ SOCKS5 tunnels raw TCP, so the same command works whether the target is HTTP or 
 
 ```bash
 # Credentials embedded in the proxy string
-curl --socks5 acct-region-jp-session-browser:change-me@localhost:7801 https://www.gstatic.com/generate_204
-
-# Region + AI unlock + sticky session
-curl -x socks5://acct-region-jp-unlock-gpt-session-browser:change-me@localhost:7801 https://www.gstatic.com/generate_204
+curl --socks5 username-region-jp-session-browser:password@YOUR-HOST-IP:7801 https://www.gstatic.com/generate_204
 
 # Equivalent, passing credentials separately
-curl --socks5 localhost:7801 -U acct-region-jp-session-browser:change-me https://www.gstatic.com/generate_204
+curl --socks5 YOUR-HOST-IP:7801 -U username-region-jp-session-browser:password https://www.gstatic.com/generate_204
 ```
 
 To resolve the target hostname at the exit node instead of locally, use the `socks5h` scheme:
 
 ```bash
-curl -x socks5h://acct-region-us-unlock-cf:change-me@localhost:7801 https://www.gstatic.com/generate_204
+curl -x socks5h://username-region-us:password@YOUR-HOST-IP:7801 https://www.gstatic.com/generate_204
 ```
 
 > When authentication is enabled, a client that offers no credentials is rejected during the SOCKS5 handshake (no acceptable method), and HTTP requests receive `407 Proxy Authentication Required`.
@@ -223,9 +188,9 @@ curl -x socks5h://acct-region-us-unlock-cf:change-me@localhost:7801 https://www.
 ### Environment variables
 
 ```bash
-export http_proxy=http://acct:change-me@localhost:7802
-export https_proxy=http://acct:change-me@localhost:7802
-export ALL_PROXY=socks5://acct-session-browser:change-me@localhost:7801
+export http_proxy=http://username:password@YOUR-HOST-IP:7802
+export https_proxy=http://username:password@YOUR-HOST-IP:7802
+export ALL_PROXY=socks5://username-session-browser:password@YOUR-HOST-IP:7801
 ```
 
 ## WebUI
@@ -258,7 +223,7 @@ Subscription nodes are managed through subscription operations. Manual-node dele
 
 ## Local Bypass And Inbound Hardening
 
-- HTTP, CONNECT, and SOCKS5 clients that target loopback, `localhost` / `.local`, RFC1918 private ranges, or IPv6 ULA are **bypassed** to the gateway host (direct dial, not via an upstream node).
+- HTTP, CONNECT, and SOCKS5 clients that target loopback, `127.0.0.1` / `.local`, RFC1918 private ranges, or IPv6 ULA are **bypassed** to the gateway host (direct dial, not via an upstream node).
 - Link-local addresses (including cloud metadata such as `169.254.169.254`) are **not** bypassed; they stay on the upstream path so the gateway does not dial host credential endpoints.
 - HTTP inbound applies `ReadHeaderTimeout` (from the validation timeout, default 10s) to limit half-header stall risk.
 - SOCKS5 inbound bounds handshake/auth/request framing and clears the protocol deadline after the request so long-lived tunnels are not cut short.

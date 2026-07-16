@@ -2,7 +2,7 @@
 
 # GoProxy 持续测试脚本 - 类似 ping 命令的简洁输出
 # 按 Ctrl+C 停止测试
-# 用法: GOPROXY_AUTH_USERNAME=acct GOPROXY_AUTH_PASSWORD=... ./test_proxy.sh [端口号，默认7802]
+# 用法: GOPROXY_AUTH_USERNAME=username GOPROXY_AUTH_PASSWORD=... ./test_proxy.sh [端口号，默认7802]
 # 可选: GOPROXY_AUTH_REGION=us GOPROXY_AUTH_SESSION=browser
 
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"

@@ -632,6 +632,32 @@ func (m *Manager) replaceSubscriptionProxies(subID int64, entries []subscription
 	}
 	defer tx.Rollback()
 
+	// 刷新前快照节点级 user_paused：DELETE+INSERT 会丢掉该标志，须按 address 回写，避免用户停用被静默撤销。
+	pausedByAddr := map[string]bool{}
+	pauseRows, err := tx.Query(
+		`SELECT address, user_paused FROM proxies WHERE subscription_id = ? AND source = ?`,
+		subID, storage.SourceSubscription,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("读取订阅节点暂停状态失败: %w", err)
+	}
+	for pauseRows.Next() {
+		var addr string
+		var paused int
+		if err := pauseRows.Scan(&addr, &paused); err != nil {
+			pauseRows.Close()
+			return nil, fmt.Errorf("扫描订阅节点暂停状态失败: %w", err)
+		}
+		if paused == 1 {
+			pausedByAddr[addr] = true
+		}
+	}
+	if err := pauseRows.Err(); err != nil {
+		pauseRows.Close()
+		return nil, fmt.Errorf("遍历订阅节点暂停状态失败: %w", err)
+	}
+	pauseRows.Close()
+
 	res, err := tx.Exec(`DELETE FROM proxies WHERE subscription_id = ? AND source = ?`, subID, storage.SourceSubscription)
 	if err != nil {
 		return nil, fmt.Errorf("删除订阅旧代理失败: %w", err)
@@ -646,15 +672,20 @@ func (m *Manager) replaceSubscriptionProxies(subID int64, entries []subscription
 
 	proxies := make([]storage.Proxy, 0, len(entries))
 	for _, entry := range entries {
+		userPaused := 0
+		if pausedByAddr[entry.addr] {
+			userPaused = 1
+		}
 		res, err := tx.Exec(
-			`INSERT INTO proxies (address, protocol, source, subscription_id, region_source, status, dual_protocol)
-			 VALUES (?, ?, ?, ?, 'auto', 'disabled', ?)
+			`INSERT INTO proxies (address, protocol, source, subscription_id, region_source, status, dual_protocol, user_paused)
+			 VALUES (?, ?, ?, ?, 'auto', 'disabled', ?, ?)
 			 ON CONFLICT(address, source, subscription_id) DO UPDATE SET
 				protocol = excluded.protocol,
 				region_source = CASE WHEN proxies.region_source = '' THEN excluded.region_source ELSE proxies.region_source END,
 				status = 'disabled',
-				dual_protocol = excluded.dual_protocol`,
-			entry.addr, entry.proto, storage.SourceSubscription, subID, entry.dual,
+				dual_protocol = excluded.dual_protocol,
+				user_paused = excluded.user_paused`,
+			entry.addr, entry.proto, storage.SourceSubscription, subID, entry.dual, userPaused,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("新增订阅代理 %s 失败: %w", entry.addr, err)
@@ -669,6 +700,7 @@ func (m *Manager) replaceSubscriptionProxies(subID int64, entries []subscription
 			Source:         storage.SourceSubscription,
 			SubscriptionID: subID,
 			DualProtocol:   entry.dual,
+			UserPaused:     userPaused == 1,
 		})
 	}
 
@@ -1226,7 +1258,8 @@ type ManualImportResult struct {
 
 // AddManualNode 从单个链接添加人工节点，存储为 source=manual。
 // 直连节点（http/socks5）先以 disabled 入库，再并发验证；通过后才 active。
-// 加密节点通过 sing-box 转换为本地 socks5 后入库，并同样进入验证。
+// 加密节点经 sing-box 转本地 mixed 后入库并保持 disabled（不在 refreshMu 内做长时间验证），
+// 由 UI「测试」或后续探测写回后再 active。
 func (m *Manager) AddManualNode(link, region, note string) error {
 	node, err := ParseSingleLink(link)
 	if err != nil {

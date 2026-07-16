@@ -9,7 +9,7 @@ Current runtime summary:
 - HTTP proxy listens on `HTTP_PORT` (`7802` by default).
 - Upstream nodes are stored in SQLite as `manual` or `subscription` sources.
 - Subscription inputs may be URL, pasted file content, or supported node text formats; `sing-box` converts encrypted subscription nodes into local SOCKS5 upstreams.
-- Routing is handled by username DSL suffixes such as `acct-region-us`, `acct-session-browser`, and `acct-region-jp-session-app01`.
+- Routing is handled by username DSL suffixes such as `username-region-us`, `username-session-browser`, and `username-region-jp-session-app01`.
 - Selection uses available node status, requested/default region, and short-lived session affinity.
 
 Use `README.md`, `.env.example`, and `docker-compose.yml` as the current deployment references.

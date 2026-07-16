@@ -13,38 +13,38 @@ func TestParseUsernameUnlockFilters(t *testing.T) {
 	}{
 		{
 			name: "gpt only",
-			raw:  "acct-unlock-gpt",
-			want: ParsedUsername{Base: "acct", Unlock: []string{"openai"}},
+			raw:  "username-unlock-gpt",
+			want: ParsedUsername{Base: "username", Unlock: []string{"openai"}},
 		},
 		{
 			name: "openai alias",
-			raw:  "acct-unlock-openai",
-			want: ParsedUsername{Base: "acct", Unlock: []string{"openai"}},
+			raw:  "username-unlock-openai",
+			want: ParsedUsername{Base: "username", Unlock: []string{"openai"}},
 		},
 		{
 			name: "claude",
-			raw:  "acct-unlock-claude",
-			want: ParsedUsername{Base: "acct", Unlock: []string{"claude"}},
+			raw:  "username-unlock-claude",
+			want: ParsedUsername{Base: "username", Unlock: []string{"claude"}},
 		},
 		{
 			name: "cf only",
-			raw:  "acct-unlock-cf",
-			want: ParsedUsername{Base: "acct", Unlock: []string{"cf"}},
+			raw:  "username-unlock-cf",
+			want: ParsedUsername{Base: "username", Unlock: []string{"cf"}},
 		},
 		{
 			name: "all expands to five requirements",
-			raw:  "acct-unlock-all",
-			want: ParsedUsername{Base: "acct", Unlock: []string{"openai", "claude", "grok", "gemini", "cf"}},
+			raw:  "username-unlock-all",
+			want: ParsedUsername{Base: "username", Unlock: []string{"openai", "claude", "grok", "gemini", "cf"}},
 		},
 		{
 			name: "region then unlock then session",
-			raw:  "acct-region-us-unlock-gpt-session-abc",
-			want: ParsedUsername{Base: "acct", Region: "us", Session: "abc", Unlock: []string{"openai"}},
+			raw:  "username-region-us-unlock-gpt-session-abc",
+			want: ParsedUsername{Base: "username", Region: "us", Session: "abc", Unlock: []string{"openai"}},
 		},
 		{
 			name: "region unlock all",
-			raw:  "acct-region-jp-unlock-all",
-			want: ParsedUsername{Base: "acct", Region: "jp", Unlock: []string{"openai", "claude", "grok", "gemini", "cf"}},
+			raw:  "username-region-jp-unlock-all",
+			want: ParsedUsername{Base: "username", Region: "jp", Unlock: []string{"openai", "claude", "grok", "gemini", "cf"}},
 		},
 	}
 	for _, tt := range tests {
@@ -65,10 +65,10 @@ func TestParseUsernameUnlockFilters(t *testing.T) {
 
 func TestParseUsernameRejectsInvalidUnlock(t *testing.T) {
 	for _, raw := range []string{
-		"acct-unlock-",
-		"acct-unlock-netflix",
-		"acct-unlock-gpt-unlock-cf", // 单次仅允许一个 unlock 段
-		"acct-session-x-unlock-gpt", // 顺序：unlock 必须在 session 之前
+		"username-unlock-",
+		"username-unlock-netflix",
+		"username-unlock-gpt-unlock-cf", // 单次仅允许一个 unlock 段
+		"username-session-x-unlock-gpt", // 顺序：unlock 必须在 session 之前
 	} {
 		if _, err := ParseUsername(raw); err == nil {
 			t.Fatalf("ParseUsername(%q) expected error", raw)

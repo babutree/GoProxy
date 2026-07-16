@@ -31,8 +31,8 @@ func TestDefaultConfigUsesPRDPortsAndGatewaySettings(t *testing.T) {
 	if cfg.DefaultRegion != "" {
 		t.Fatalf("DefaultRegion = %q, want empty", cfg.DefaultRegion)
 	}
-	if cfg.ProxyAuthUsername != "acct" {
-		t.Fatalf("ProxyAuthUsername = %q, want acct", cfg.ProxyAuthUsername)
+	if cfg.ProxyAuthUsername != "username" {
+		t.Fatalf("ProxyAuthUsername = %q, want username", cfg.ProxyAuthUsername)
 	}
 }
 

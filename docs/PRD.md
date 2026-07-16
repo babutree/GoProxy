@@ -64,12 +64,12 @@
 **示例**:
 | 用户名 | 行为 |
 |--------|------|
-| `acct` | 不限地域、不黏连: 每请求随机选任意可用节点 |
-| `acct-region-us` | 限定美国出口, 不黏连: 每请求随机选一个美国节点 |
-| `acct-unlock-gpt` | 仅选 OpenAI 探测可达的节点 |
-| `acct-unlock-all` | 要求 OpenAI+Claude+Grok+Gemini+CF 均通过 |
-| `acct-region-jp-unlock-gpt-session-abc123` | 日本出口 + GPT 解锁 + 会话 abc123 黏连 |
-| `acct-session-xy` | 不限地域 + 会话 xy 黏连到某个任意节点 |
+| `username` | 不限地域、不黏连: 每请求随机选任意可用节点 |
+| `username-region-us` | 限定美国出口, 不黏连: 每请求随机选一个美国节点 |
+| `username-unlock-gpt` | 仅选 OpenAI 探测可达的节点 |
+| `username-unlock-all` | 要求 OpenAI+Claude+Grok+Gemini+CF 均通过 |
+| `username-region-jp-unlock-gpt-session-abc123` | 日本出口 + GPT 解锁 + 会话 abc123 黏连 |
+| `username-session-xy` | 不限地域 + 会话 xy 黏连到某个任意节点 |
 
 **解析规则**:
 - 基础用户名必须等于配置的 `AuthUsername`, 否则认证失败。
@@ -281,7 +281,7 @@ type Binding struct {
 
 ### 6.1 HTTP 请求
 ```
-客户端 --Basic Auth(acct-region-us-session-x)--> :7802 HTTP 入口
+客户端 --Basic Auth(username-region-us-session-x)--> :7802 HTTP 入口
   1. 校验密码; 解析用户名 DSL → {region:us, session:x}
   2. affinity.Get("x"):
        命中且节点存活且region匹配 → 用该节点
@@ -293,7 +293,7 @@ type Binding struct {
 
 ### 6.2 SOCKS5 请求
 ```
-客户端 --SOCKS5 auth(username=acct-region-jp-session-y,password)--> :7801
+客户端 --SOCKS5 auth(username=username-region-jp-session-y,password)--> :7801
   1. 握手协商 0x02 用户名密码认证
   2. 校验密码; 解析 DSL → {region:jp, session:y}
   3. 同 6.1 步骤 2-5 (SOCKS5 CONNECT 转发)
@@ -337,7 +337,7 @@ type Binding struct {
 | # | 决策点 | 采纳的默认值 |
 |---|--------|--------------|
 | 1 | 地域分流方式 | 单端口 + 用户名 kv 分段 DSL |
-| 1a | DSL 语法 | `acct-region-us-session-x` (kv 分段) |
+| 1a | DSL 语法 | `username-region-us-session-x` (kv 分段) |
 | 1b | 地域粒度 | 国家级 (alpha-2) |
 | 2 | 账户体系 | 单账户 (基础用户名+密码, region/session 为后缀) |
 | 3 | 无节点处理 | 直接失败, 不 fallback |
@@ -369,7 +369,7 @@ type Binding struct {
 ---
 
 ## 11. 验收总标准 (整体)
-1. 客户端用 `acct-region-us-session-x` 经 HTTP/SOCKS5 均能定向到美国节点, 且同 session 多次请求出口 IP 稳定。
+1. 客户端用 `username-region-us-session-x` 经 HTTP/SOCKS5 均能定向到美国节点, 且同 session 多次请求出口 IP 稳定。
 2. 切换 session id, 出口节点随之改变 (可能不同)。
 3. 请求不存在节点的地域, 明确返回失败, 不静默走其他地域。
 4. 订阅 + 手动节点均可用; 加密节点经 sing-box 正常转换。

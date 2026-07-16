@@ -102,10 +102,10 @@ func TestDashboardRiskColumnsAndBadges(t *testing.T) {
 // toggleStar/starBtn/randSession 函数、星标可用置顶 sort 片段、/api/proxy/star 路由调用。
 func TestDashboardStarCopyAndCFColumns(t *testing.T) {
 	checks := []string{
-		// 表头新增星标列与 CF 列（CF 表头图标化，与 AI 表头统一为 th-ico 图标+短标签）。
+		// 表头新增星标列与 Cloudflare 列（th-ico 图标+正规短标签）。
 		"<th>★</th>",
-		`<span class="th-ico" title="Cloudflare 拦截探测`,
-		`<span class="tx">CF</span>`,
+		`<span class="th-ico" title="Cloudflare`,
+		`<span class="tx">Cloudflare</span>`,
 		// 两处 colspan 为 14（含多选勾选列）。
 		"<td colspan=\"14\" class=\"empty\">加载中</td>",
 		"<td colspan=\"14\" class=\"empty\">没有匹配节点</td>",
@@ -143,11 +143,12 @@ func TestDashboardNodeStateAndRegionDistributionUseAvailableKnownRegions(t *test
 		"function isUserPaused(p){return !!(p&&(p.user_paused===true||Number(p.user_paused)===1))}",
 		"function isAvailable(proxy){return !isUserPaused(proxy)&&(proxy.status==='active'||proxy.status==='degraded')&&Number(proxy.fail_count||0)<3}",
 		// BUG-50: nodeState 主判据改为 user_paused（存储层新口径 status 仍为 active）。
-		"function nodeState(p){if(isUserPaused(p)||p.status==='paused')return 'paused';if(isAvailable(p))return 'ok';if(p.status==='disabled'||Number(p.fail_count||0)>=3)return 'failed';return 'pending'}",
+		"function hasLastCheck(p){",
+		"function nodeState(p){if(isUserPaused(p)||p.status==='paused')return 'paused';if(isAvailable(p))return 'ok';if(Number(p.fail_count||0)>=3)return 'failed';if(p.status==='disabled')return hasLastCheck(p)?'failed':'pending';return 'pending'}",
 		// BUG-51: allRegions/地域分布均经 isAvailable 过滤，因此不再计入 user_paused 节点。
 		"allRegions=Array.from(new Set(allProxies.filter(p=>isAvailable(p)&&isKnownRegion(p)).map(regionOf))).sort()",
 		"allProxies.filter(p=>isAvailable(p)&&isKnownRegion(p)).forEach",
-		"available nodes",
+		"个可用节点",
 		"暂无可用地域数据",
 	}
 	for _, check := range checks {
@@ -359,65 +360,51 @@ func TestDashboardProtocolBadgesShowMixedNodeDualLabels(t *testing.T) {
 	}
 }
 
-// TestDashboardWorldMap 验证"全球节点分布"地图卡片：纯前端内联 SVG(无外部依赖)、
-// COUNTRY_XY 国家坐标表(20+ 国家)、renderWorldMap 按 isAvailable&&isKnownRegion 聚合计数、
-// 点半径随节点数(log 映射)、CSS @keyframes 脉冲闪烁、活跃 session 连线(中心->国家)走
-// stroke-dasharray 流动动画，且 renderWorldMap() 在 loadProxies/loadSessions 中被调用。
-func TestDashboardWorldMap(t *testing.T) {
+// TestDashboardNodeOrbit 验证总览节点分布图：按可用地域+延迟档聚合，session 画连线，rAF 动画。
+func TestDashboardNodeOrbit(t *testing.T) {
 	checks := []string{
-		// 地图卡片标题。
-		"<h3>全球节点分布</h3>",
-		// 内联 SVG 世界地图(equirectangular viewBox)，纯内联无外部文件/CDN。
-		"<svg id=\"world-map\" class=\"worldmap-svg\" viewBox=\"0 0 1000 500\"",
-		// 简化世界轮廓 land path。
-		"class=\"worldmap-land\"",
-		// 连线与亮点分组容器。
-		"<g id=\"worldmap-links\"></g>",
-		"<g id=\"worldmap-dots\"></g>",
-		// 国家坐标表(相对 viewBox 的近似位置)，覆盖常见国家。
-		"const COUNTRY_XY={",
-		"us:[228,142]",
-		"jp:[883,150]",
-		"hk:[817,189]",
-		"sg:[788,246]",
-		"kr:[855,149]",
-		"gb:[496,100]",
-		"de:[529,108]",
-		"fr:[506,121]",
-		"nl:[515,106]",
-		"ca:[206,94]",
-		"au:[869,319]",
-		"tw:[836,184]",
-		"in:[719,193]",
-		"ru:[750,81]",
-		// 全局会话缓存(供地图连线使用)。
-		"let worldMapSessions=[]",
-		// 渲染函数。
-		"function renderWorldMap(){",
-		// 按可用且已知地域的节点聚合计数(独立于 renderRegions 的 wmCounts)。
-		"wmCounts[r]=(wmCounts[r]||0)+1",
-		// 点半径随该国节点数增大(log 映射)。
-		"const radius=(4+3*Math.log(1+c)).toFixed(1)",
-		// 亮点 circle 类名(脉冲闪烁靠 CSS)。
-		"class=\"worldmap-dot\"",
-		// 活跃 session 连线：中心(网关)到该国坐标的 path。
-		"linkHTML+='<path class=\"worldmap-link\" d=\"M'+cx+' '+cy+' Q'+qx+' '+qy+' '+xy[0]+' '+xy[1]+'\"></path>'",
-		// CSS 脉冲闪烁 @keyframes(纯 CSS，不用 JS 定时器)。
-		"@keyframes wm-pulse",
-		".worldmap-dot{fill:var(--accent);animation:wm-pulse",
-		// 连线流动：stroke-dasharray + stroke-dashoffset 动画。
-		"stroke-dasharray:6 6",
-		"@keyframes wm-flow",
-		"stroke-dashoffset:-24",
-		// renderWorldMap() 在 loadProxies 成功后被调用。
-		"renderRegions();renderWorldMap()",
-		// renderWorldMap() 在 loadSessions 成功后被调用(先缓存 sessions)。
-		"worldMapSessions=Array.isArray(sessions)?sessions:[];renderWorldMap()",
+		"<h3>节点分布</h3>",
+		`id="orbit-stage"`,
+		`id="orbit-svg"`,
+		`id="orbit-sats"`,
+		`id="orbit-gw-ip"`,
+		`id="orbit-pause-btn"`,
+		"function renderOrbitSystem(){",
+		"function buildOrbitSats(){",
+		"function orbitFrame(",
+		"requestAnimationFrame(orbitFrame)",
+		"isAvailable(p)&&isKnownRegion(p)",
+		"function orbitQualityTrack(",
+		"orbitSessions",
+		"function renderWorldMap(){renderOrbitSystem()}",
+		"renderRegions();renderOrbitSystem()",
+		"orbitSessions=Array.isArray(sessions)?sessions:[];renderOrbitSystem()",
+		"S ≤500ms",
+		"会话连线（越粗绑定越多）",
+		"function updateSolarWind(",
+		"function updateGravLens(",
+		"function spawnWindStreams(",
+		`id="orbit-wind"`,
+		`id="orbit-lens"`,
 	}
 	for _, check := range checks {
 		t.Run(check, func(t *testing.T) {
 			if !strings.Contains(dashboardBundle, check) {
-				t.Fatalf("dashboardHTML missing world-map invariant %q", check)
+				t.Fatalf("dashboardHTML missing node-orbit invariant %q", check)
+			}
+		})
+	}
+	// 旧世界地图轮廓 path / COUNTRY_XY 不得残留。
+	for _, bad := range []string{
+		`id="world-map"`,
+		"class=\"worldmap-land\"",
+		"const COUNTRY_XY={",
+		"us:[228,142]",
+		"let worldMapSessions=[]",
+	} {
+		t.Run("reject "+bad, func(t *testing.T) {
+			if strings.Contains(dashboardBundle, bad) {
+				t.Fatalf("dashboard still has legacy world-map fragment %q", bad)
 			}
 		})
 	}
@@ -493,13 +480,17 @@ func TestDashboardProxyActionsUnifiedAcrossSources(t *testing.T) {
 	}
 }
 
-// TestDashboardHasSettingsEntry：顶栏或侧栏必须有系统设置入口（不能只藏在 API 页）。
+// TestDashboardHasSettingsEntry：侧栏运维分组设置入口；设置为独立页面（非模态）。
 func TestDashboardHasSettingsEntry(t *testing.T) {
 	checks := []string{
-		"openSettings()",
-		"settings-modal",
-		// 顶栏 actions 或侧栏 foot 中的设置入口。
-		`title="系统设置"`,
+		`id="page-settings"`,
+		`id="settings-modal"`,
+		`data-tab="settings"`,
+		`title="设置"`,
+		`switchTab('settings')`,
+		// 主题切换在顶栏。
+		`id="theme-toggle"`,
+		`id="pageTitle"`,
 	}
 	for _, check := range checks {
 		t.Run(check, func(t *testing.T) {
@@ -510,14 +501,12 @@ func TestDashboardHasSettingsEntry(t *testing.T) {
 	}
 }
 
-// TestDashboardAIReachabilityColumnAndBadges 验证新增 AI 可达性列（openai/claude/grok/gemini）：
-// 表头新增 <th>AI</th>；因新增此列，节点表格从 12 列变 13 列，两处 colspan 须为 13；
-// aiBadges(json) 函数存在、解析 ai_reachability JSON 渲染 4 个 AI 小徽章（可达绿/不可达红/未探测灰"--"）；
-// 行渲染调用 aiBadges(p.ai_reachability)。
+// TestDashboardAIReachabilityColumnAndBadges 验证 AI 解锁列（openai/claude/grok/gemini）：
+// 表头 AI 解锁；colspan 14；aiBadges 渲染正规短标签（ChatGPT/Claude/Grok/Gemini），绿畅通/红阻断/灰未知。
 func TestDashboardAIReachabilityColumnAndBadges(t *testing.T) {
 	checks := []string{
-		// AI 表头图标化（图标 + 短标签 AI），与 CF 表头统一为 th-ico 图标语言。
-		`<span class="tx">AI</span>`,
+		// AI 解锁表头（Orbit 正规名）。
+		`<span class="tx">AI 解锁</span>`,
 		// 两处 colspan 为 14（加载中 + 无匹配节点，含勾选列）。
 		"<td colspan=\"14\" class=\"empty\">加载中</td>",
 		"<td colspan=\"14\" class=\"empty\">没有匹配节点</td>",
@@ -525,8 +514,10 @@ func TestDashboardAIReachabilityColumnAndBadges(t *testing.T) {
 		"function aiBadges(",
 		// 行渲染引用 ai_reachability 字段。
 		"aiBadges(p.ai_reachability)",
-		// AI 列 body 用 ✓/✗/– 标记取代坏掉的品牌 SVG（可达✓ / 不可达✗ / 未探测–）。
+		// AI 列 body 用 ✓/✗/– 标记取代坏掉的品牌 SVG。
 		"const glyph=n===0?'✓':(n===1?'✗':'–')",
+		// 四服务正规短标签。
+		"['openai','ChatGPT','ChatGPT']",
 		// 四服务紧凑标记容器。
 		`'<span class="ai-marks">'`,
 		"<span class=\"ai-mark '+cls+'\"",
@@ -596,7 +587,7 @@ func TestDashboardManualImportCopyAllowsAnyAnnotationPosition(t *testing.T) {
 
 func TestDashboardLogoutUsesPostFlow(t *testing.T) {
 	checks := []string{
-		`<button class="btn danger" onclick="logout()" title="退出登录" aria-label="退出登录">`,
+		`onclick="logout()" title="退出登录" aria-label="退出登录"`,
 		"async function logout(){return runAsync('退出失败'",
 		"fetch('/logout',{method:'POST'})",
 	}
@@ -688,13 +679,60 @@ func TestDashboardOpenAPITab(t *testing.T) {
 		"curl",
 		"direct",
 		"gateway",
-		`<span class="lbl">API</span>`,
-		"<h3>API</h3>",
+		`class="lbl t">API</span>`,
+		"<h3>开放 API 说明</h3>",
 	}
 	for _, check := range checks {
 		t.Run(check, func(t *testing.T) {
 			if !strings.Contains(dashboardBundle, check) {
 				t.Fatalf("dashboardHTML missing Open API tab invariant %q", check)
+			}
+		})
+	}
+}
+
+// TestDashboardOrbitThemeTokens 锁定生产 CSS 主题 token 与 AI 短标签。
+func TestDashboardOrbitThemeTokens(t *testing.T) {
+	checks := []string{
+		"#04060e",
+		"#3b8dff",
+		"#2fbf87",
+		"--q-s:",
+		"--q-a:",
+		"--q-b:",
+		"--q-c:",
+		`[data-theme="space"]`,
+		`[data-theme="day"]`,
+		"--space-0:",
+		"--bg-canvas:",
+		"['openai','ChatGPT','ChatGPT']",
+		"['claude','Claude','Claude']",
+		"['gemini','Gemini','Gemini']",
+		"['grok','Grok','Grok']",
+		`<span class="tx">Cloudflare</span>`,
+		"function normalizeTheme(",
+		"localStorage.getItem('gg-theme')||'space'",
+	}
+	for _, check := range checks {
+		t.Run(check, func(t *testing.T) {
+			if !strings.Contains(dashboardBundle, check) {
+				t.Fatalf("dashboard bundle missing Orbit theme invariant %q", check)
+			}
+		})
+	}
+	// 禁止蓝紫/teal 违规渐变残留
+	for _, bad := range []string{
+		"#6d5cf7",
+		"--signal:#0a9fbf",
+		"--signal:#22d3ee",
+		"['openai','GPT','OpenAI']",
+		"['claude','Cld','Claude']",
+		"['grok','Grk','Grok']",
+		"['gemini','Gem','Gemini']",
+	} {
+		t.Run("reject "+bad, func(t *testing.T) {
+			if strings.Contains(dashboardBundle, bad) {
+				t.Fatalf("dashboard bundle still has non-Orbit token/label %q", bad)
 			}
 		})
 	}

@@ -34,7 +34,7 @@ func (s *Server) apiV1Nodes(w http.ResponseWriter, r *http.Request) {
 	publicHost, hostUnresolved := resolvePublicHost(cfg, r)
 	socksPort := stripLeadingColonPort(cfg.SOCKS5Port)
 	httpPort := stripLeadingColonPort(cfg.HTTPPort)
-	usernameBase := "acct"
+	usernameBase := "username"
 	if strings.TrimSpace(cfg.ProxyAuthUsername) != "" {
 		usernameBase = strings.TrimSpace(cfg.ProxyAuthUsername)
 	}
@@ -286,7 +286,7 @@ func parseAIReachabilityObject(raw string) map[string]any {
 func gatewayUsernameHint(base, region string) string {
 	base = strings.TrimSpace(base)
 	if base == "" {
-		base = "acct"
+		base = "username"
 	}
 	region = strings.ToLower(strings.TrimSpace(region))
 	if region == "" {

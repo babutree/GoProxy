@@ -162,7 +162,7 @@
         "host": "203.0.113.200",     // 服务器公网 IP（覆盖/探测得来；取不到则为空）
         "gateway_socks5_port": 7801,
         "gateway_http_port": 7802,
-        "username_hint": "acct-region-jp-session-api",
+        "username_hint": "username-region-jp-session-api",
         "note": "需网关代理认证；密码见部署配置。host 为空时请用部署域名/请求 Host。"
       },
       "exit_ip": "203.0.113.9",

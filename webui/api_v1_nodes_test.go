@@ -25,7 +25,7 @@ func newNodesAPITestServer(t *testing.T, plainKey string) (*Server, string) {
 	server.cfg.PublicHost = "203.0.113.50"
 	server.cfg.SOCKS5Port = ":7801"
 	server.cfg.HTTPPort = ":7802"
-	server.cfg.ProxyAuthUsername = "acct"
+	server.cfg.ProxyAuthUsername = "username"
 	server.cfg.ProxyAuthPassword = "super-secret-proxy-pass"
 	return server, plainKey
 }
@@ -228,7 +228,7 @@ func TestApiV1NodesTunnelNodeReportsGatewayConnect(t *testing.T) {
 		}
 		hint, _ := conn["username_hint"].(string)
 		region, _ := n["region"].(string)
-		wantPrefix := "acct-region-" + region + "-session-"
+		wantPrefix := "username-region-" + region + "-session-"
 		if !strings.HasPrefix(hint, wantPrefix) {
 			t.Fatalf("username_hint = %q, want prefix %q", hint, wantPrefix)
 		}
