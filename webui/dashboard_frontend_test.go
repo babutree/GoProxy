@@ -516,8 +516,8 @@ func TestDashboardAIReachabilityColumnAndBadges(t *testing.T) {
 		"aiBadges(p.ai_reachability)",
 		// AI 列 body 用 ✓/✗/– 标记取代坏掉的品牌 SVG。
 		"const glyph=n===0?'✓':(n===1?'✗':'–')",
-		// 四服务正规短标签。
-		"['openai','ChatGPT','ChatGPT']",
+		// 四服务短标签（设计稿风格：GPT/Cld/Grk/Gem，title 保全称）。
+		"['openai','GPT','ChatGPT']",
 		// 四服务紧凑标记容器。
 		`'<span class="ai-marks">'`,
 		"<span class=\"ai-mark '+cls+'\"",
@@ -705,10 +705,10 @@ func TestDashboardOrbitThemeTokens(t *testing.T) {
 		`[data-theme="day"]`,
 		"--space-0:",
 		"--bg-canvas:",
-		"['openai','ChatGPT','ChatGPT']",
-		"['claude','Claude','Claude']",
-		"['gemini','Gemini','Gemini']",
-		"['grok','Grok','Grok']",
+		"['openai','GPT','ChatGPT']",
+		"['claude','Cld','Claude']",
+		"['gemini','Gem','Gemini']",
+		"['grok','Grk','Grok']",
 		`<span class="tx">Cloudflare</span>`,
 		"function normalizeTheme(",
 		"localStorage.getItem('gg-theme')||'space'",
@@ -726,9 +726,6 @@ func TestDashboardOrbitThemeTokens(t *testing.T) {
 		"--signal:#0a9fbf",
 		"--signal:#22d3ee",
 		"['openai','GPT','OpenAI']",
-		"['claude','Cld','Claude']",
-		"['grok','Grk','Grok']",
-		"['gemini','Gem','Gemini']",
 	} {
 		t.Run("reject "+bad, func(t *testing.T) {
 			if strings.Contains(dashboardBundle, bad) {

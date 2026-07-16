@@ -20,9 +20,14 @@
 
 - **订阅刷新保留 user_paused**：刷新 DELETE+INSERT 后按 address 回写用户停用，避免手动停用被静默撤销
 - **sticky + unlock 回归**：预绑 session 在 unlock 不匹配时 rebind，并补真 sticky 测试
+- **WebUI 深色侧栏未选项**：button 默认背景重置为透明，未选中色改用 `--muted`
+- **浅色主题命令示例框**：`.cmd`/`.code-block` 在 day 主题改为白底深字，避免偏黑突兀
+- **运行日志高度**：日志区相对视口再减约 40px，避免略超出屏幕
+- **节点分布控制文案**：暂停按钮改为「暂停动画 / 恢复动画」
 
 ### 新增
 
+- **订阅修改 API**：`POST /api/subscription/update`，WebUI 支持编辑名称/URL/间隔/请求头
 - **会话占用上限**（可选）：max_sessions_per_proxy / MAX_SESSIONS_PER_PROXY，默认 0 不限制；>0 时新 session 绑定受每节点上限约束
 - **代理节点冷却 CD**（可选）：proxy_cooldown_minutes / PROXY_COOLDOWN_MINUTES，默认 0 关闭；>0 时新 session 首次绑定后，冷却期内其他新 session 不选该节点；同 session 粘性不受影响；无 session 的 Pick 忽略冷却
 - **节点占用可观测 API**：已认证 `GET /api/proxy-occupancy` 返回每节点 `proxy_id` / `address` / `active_sessions` / `max_sessions` / `cooldown_remaining_seconds`（返回真实冷却剩余秒数）；无密码字段
@@ -287,6 +292,6 @@
 
 ## 相关链接
 
-- [项目仓库](https://github.com/babutree/GoProxy)
-- [GitHub Container Registry](https://github.com/babutree/GoProxy/pkgs/container/goproxy)
-- [问题反馈](https://github.com/babutree/GoProxy/issues)
+- [项目仓库](https://github.com/babutree/GeoProxy)
+- [GitHub Container Registry](https://github.com/babutree/GeoProxy/pkgs/container/goproxy)
+- [问题反馈](https://github.com/babutree/GeoProxy/issues)

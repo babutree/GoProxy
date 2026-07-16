@@ -304,3 +304,67 @@ func (s *Server) apiSubscriptionToggle(w http.ResponseWriter, r *http.Request) {
 
 	jsonOK(w, map[string]string{"status": status})
 }
+
+// apiSubscriptionUpdate 修改订阅元数据（名称/URL/刷新间隔/请求头）。
+// 保留既有 file_path 与 format，不改动已入库的节点。修改后异步重新拉取。
+func (s *Server) apiSubscriptionUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		ID         int64  `json:"id"`
+		Name       string `json:"name"`
+		URL        string `json:"url"`
+		RefreshMin int    `json:"refresh_min"`
+		Headers    string `json:"headers"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		jsonDecodeError(w, err)
+		return
+	}
+	if req.ID <= 0 {
+		jsonError(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if err := custom.ValidateSubscriptionHeaders(req.Headers); err != nil {
+		jsonError(w, "invalid headers", http.StatusBadRequest)
+		return
+	}
+
+	existing, err := s.storage.GetSubscription(req.ID)
+	if err != nil {
+		log.Printf("[webui] load subscription #%d failed: %v", req.ID, err)
+		jsonError(w, "subscription not found", http.StatusNotFound)
+		return
+	}
+	// URL 订阅须保留 URL；文件订阅保留原 file_path，不允许把两者都清空。
+	if req.URL == "" && existing.FilePath == "" {
+		jsonError(w, "请填写订阅 URL", http.StatusBadRequest)
+		return
+	}
+	if req.RefreshMin <= 0 {
+		req.RefreshMin = existing.RefreshMin
+	}
+	if req.Name == "" {
+		req.Name = existing.Name
+	}
+
+	if err := s.storage.UpdateSubscription(req.ID, req.Name, req.URL, existing.FilePath, existing.Format, req.RefreshMin, req.Headers); err != nil {
+		log.Printf("[webui] update subscription #%d failed: %v", req.ID, err)
+		jsonError(w, "failed to update subscription", http.StatusInternalServerError)
+		return
+	}
+
+	// 元数据变更后异步重新拉取验证。
+	if s.customMgr != nil {
+		go func() {
+			if err := s.customMgr.RefreshSubscription(req.ID); err != nil {
+				log.Printf("[webui] 订阅刷新失败: %v", err)
+			}
+		}()
+	}
+
+	log.Printf("[webui] 修改订阅 #%d", req.ID)
+	jsonOK(w, map[string]string{"status": "updated"})
+}

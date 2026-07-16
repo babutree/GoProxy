@@ -10,6 +10,7 @@ const dashboardHTML = `<!DOCTYPE html>
 </head>
 <body>
 <div class="starfield" aria-hidden="true"><div class="stars"></div><div class="nebula"></div></div>
+<div class="app" id="app">
 <aside class="sidebar preload" id="sidebar">
  <div class="sidebar-brand brand"><div class="mark">GG</div><div class="bt">GeoProxy<small>Admin</small></div></div>
  <nav class="sidebar-nav nav" id="mainNav">
@@ -24,7 +25,6 @@ const dashboardHTML = `<!DOCTYPE html>
   <button class="navitem" data-tab="settings" onclick="switchTab('settings')" title="设置" aria-label="设置"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></span><span class="lbl t">设置</span></button>
  </nav>
  <div class="sidebar-foot sidefoot">
-  <div class="status-pill pill" id="header-status-side"><span class="dot on"></span><span class="lbl t">已连接</span></div>
   <button class="sidebar-collapse collapse-btn" onclick="toggleSidebar()" title="折叠 / 展开菜单" aria-label="折叠或展开侧边栏菜单"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg></span><span class="lbl t">收起菜单</span></button>
  </div>
 </aside>
@@ -33,11 +33,10 @@ const dashboardHTML = `<!DOCTYPE html>
 <header class="topbar">
  <button class="hamburger" onclick="openDrawer()" title="菜单" aria-label="打开导航菜单"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
  <h1 id="pageTitle">总览</h1>
- <div class="status-pill pill" id="header-status"><span class="dot on"></span><span id="header-status-text">已连接</span></div>
  <div class="topbar-spacer spacer"></div>
  <div class="actions">
   <button class="iconlink iconbtn" onclick="refreshAll()" title="全局刷新" aria-label="全局刷新"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-2.6-6.4M21 3v6h-6"/></svg></button>
-  <a class="iconlink iconbtn" href="https://github.com/babutree/GoProxy" target="_blank" rel="noopener" title="GitHub 仓库" aria-label="GitHub 仓库"><svg viewBox="0 0 24 24" aria-hidden="true" fill="currentColor"><path d="M12 1.5A10.5 10.5 0 0 0 1.5 12c0 4.64 3 8.57 7.18 9.96.53.1.72-.23.72-.51 0-.25-.01-1.08-.01-1.96-2.63.48-3.32-.64-3.53-1.23-.12-.3-.63-1.23-1.08-1.48-.37-.2-.9-.68-.01-.69.83-.01 1.42.76 1.62 1.08.95 1.6 2.47 1.15 3.07.88.1-.68.37-1.15.67-1.42-2.33-.26-4.77-1.16-4.77-5.18 0-1.14.41-2.08 1.08-2.81-.11-.27-.47-1.35.1-2.81 0 0 .88-.28 2.88 1.07a9.7 9.7 0 0 1 2.62-.35c.89 0 1.79.12 2.62.35 2-1.35 2.88-1.07 2.88-1.07.57 1.46.21 2.54.1 2.81.67.73 1.08 1.66 1.08 2.81 0 4.03-2.45 4.92-4.79 5.18.38.33.71.96.71 1.94 0 1.4-.01 2.53-.01 2.88 0 .28.19.62.72.51A10.5 10.5 0 0 0 22.5 12 10.5 10.5 0 0 0 12 1.5z"/></svg></a>
+  <a class="iconlink iconbtn" href="https://github.com/babutree/GeoProxy" target="_blank" rel="noopener" title="GitHub 仓库" aria-label="GitHub 仓库"><svg viewBox="0 0 24 24" aria-hidden="true" fill="currentColor"><path d="M12 1.5A10.5 10.5 0 0 0 1.5 12c0 4.64 3 8.57 7.18 9.96.53.1.72-.23.72-.51 0-.25-.01-1.08-.01-1.96-2.63.48-3.32-.64-3.53-1.23-.12-.3-.63-1.23-1.08-1.48-.37-.2-.9-.68-.01-.69.83-.01 1.42.76 1.62 1.08.95 1.6 2.47 1.15 3.07.88.1-.68.37-1.15.67-1.42-2.33-.26-4.77-1.16-4.77-5.18 0-1.14.41-2.08 1.08-2.81-.11-.27-.47-1.35.1-2.81 0 0 .88-.28 2.88 1.07a9.7 9.7 0 0 1 2.62-.35c.89 0 1.79.12 2.62.35 2-1.35 2.88-1.07 2.88-1.07.57 1.46.21 2.54.1 2.81.67.73 1.08 1.66 1.08 2.81 0 4.03-2.45 4.92-4.79 5.18.38.33.71.96.71 1.94 0 1.4-.01 2.53-.01 2.88 0 .28.19.62.72.51A10.5 10.5 0 0 0 22.5 12 10.5 10.5 0 0 0 12 1.5z"/></svg></a>
   <button class="iconlink iconbtn" id="theme-toggle" onclick="toggleTheme()" title="切换主题" aria-label="切换主题"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button>
   <button class="iconlink iconbtn" onclick="logout()" title="退出登录" aria-label="退出登录"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg></button>
  </div>
@@ -58,7 +57,7 @@ const dashboardHTML = `<!DOCTYPE html>
    <div class="card orbit-card">
     <div class="card-head card-h">
      <h3>节点分布</h3>
-     <div class="tools"><button class="mini tbtn" type="button" id="orbit-pause-btn" onclick="toggleOrbitPause()">暂停</button></div>
+     <div class="tools"><button class="mini tbtn" type="button" id="orbit-pause-btn" onclick="toggleOrbitPause()">暂停动画</button></div>
     </div>
     <div class="card-body card-b">
      <div class="orbit-stage stage" id="orbit-stage" role="img" aria-label="节点分布">
@@ -86,36 +85,33 @@ const dashboardHTML = `<!DOCTYPE html>
      <div class="card-body card-b"><div id="singbox-status"><div class="empty">加载中</div></div></div>
     </div>
     <div class="card">
-     <div class="card-head card-h"><h3>如何连接</h3><span class="muted sub">网关端口 + 认证</span></div>
-     <div class="card-body card-b">
-      <div class="conn">
-       <div class="conn-item"><div class="k">SOCKS5 代理</div><div class="v" id="conn-socks5">127.0.0.1:7801</div><div class="desc">raw TCP，HTTP/HTTPS 目标都可</div></div>
-       <div class="conn-item"><div class="k">HTTP 代理</div><div class="v" id="conn-http">127.0.0.1:7802</div><div class="desc">HTTPS 目标走 CONNECT 隧道</div></div>
-       <div class="conn-item"><div class="k">用户名（含路由 DSL）</div><div class="v" id="conn-user">username</div><div class="desc">见下方 DSL 规则</div></div>
-       <div class="conn-item"><div class="k">密码</div><div class="v" id="conn-pass">见首次启动日志 / 系统设置</div><div class="desc" id="conn-auth-state">代理认证状态</div></div>
-      </div>
-      <div class="cmd" id="conn-cmd">curl --socks5 username:PASSWORD@127.0.0.1:7801 https://www.gstatic.com/generate_204</div>
-      <div class="cmd-hint"><code>username</code> = 代理认证用户名（可追加 <code>-region-XX</code> / <code>-unlock-gpt\|all</code> / <code>-session-ID</code>）；<code>PASSWORD</code> 换成真实密码（在「设置」查看）。返回 <code>204</code> 即通路正常。</div>
-      <div class="notice"><span>⚠️</span><span><b>「出口 IP」不是连接地址</b>，须走网关端口 + 认证。</span></div>
-     </div>
-    </div>
-    <div class="card">
      <div class="card-head card-h"><h3>地域分布</h3><span class="muted sub" id="region-total">--</span></div>
      <div class="card-body card-b"><div id="region-list"><div class="empty">加载中</div></div></div>
     </div>
    </div>
   </div>
 
-  <div class="card">
-   <div class="card-head card-h"><h3>用户名 DSL</h3></div>
+  <div class="card" style="margin-top:16px">
+   <div class="card-head card-h"><h3>活跃会话</h3><span class="muted sub" id="ov-sess-count">--</span><div class="tools"><button class="mini" type="button" onclick="switchTab('sessions')">查看全部</button></div></div>
+   <div class="card-body card-b" style="padding:6px 8px;overflow-x:auto">
+    <table class="tbl"><thead><tr><th>会话 ID</th><th>出口地域</th><th>出口节点</th><th>剩余 TTL</th></tr></thead>
+    <tbody id="ov-session-rows"><tr><td colspan="4" class="empty">加载中</td></tr></tbody></table>
+   </div>
+  </div>
+
+  <div class="card" style="margin-top:16px">
+   <div class="card-head card-h"><h3>如何连接</h3><span class="muted sub">用网关端口 + 认证，不是直连节点</span></div>
    <div class="card-body card-b">
-    <div id="dsl-examples">
-     <div class="guide-row"><b>username</b><span>-region-us</span></div>
-     <div class="guide-row"><b>username</b><span>-unlock-gpt</span></div>
-     <div class="guide-row"><b>username</b><span>-region-jp-unlock-all-session-app01</span></div>
-     <div class="guide-row"><b>username</b><span>-session-browser</span></div>
+    <div class="conn">
+     <div class="conn-item"><div class="k">SOCKS5 代理</div><div class="v" id="conn-socks5">127.0.0.1:7801</div><div class="desc">raw TCP，HTTP/HTTPS 目标都可</div></div>
+     <div class="conn-item"><div class="k">HTTP 代理</div><div class="v" id="conn-http">127.0.0.1:7802</div><div class="desc">HTTPS 目标走 CONNECT 隧道</div></div>
+     <div class="conn-item"><div class="k">用户名（含路由 DSL）</div><div class="v" id="conn-user">username</div><div class="desc">见下方 DSL 规则</div></div>
+     <div class="conn-item"><div class="k">密码</div><div class="v" id="conn-pass">见首次启动日志 / 系统设置</div><div class="desc" id="conn-auth-state">代理认证状态</div></div>
     </div>
-    <div class="hint" id="dsl-hint">前缀 = 代理认证用户名；-region-XX 地域；-unlock-gpt|claude|gemini|grok|cf|all 解锁过滤；-session-ID 黏连。</div>
+    <div class="cmd" id="conn-cmd">curl --socks5 username:PASSWORD@127.0.0.1:7801 https://www.gstatic.com/generate_204</div>
+    <div class="hint" id="dsl-hint">前缀 “username” = 代理认证用户名；-region-XX 地域；-unlock-gpt|claude|gemini|grok|cf|all 解锁过滤；-session-ID 黏连。</div>
+    <div id="dsl-examples" hidden></div>
+    <div class="notice"><span>⚠️</span><span><b>「出口 IP」不是连接地址</b>，须走网关端口 + 认证。</span></div>
    </div>
   </div>
  </section>
@@ -147,7 +143,7 @@ const dashboardHTML = `<!DOCTYPE html>
     <div class="toolbar filters">
      <input class="input narrow" id="latency-min" type="number" min="0" step="1" placeholder="延迟≥ms" oninput="renderProxies()" aria-label="最小延迟">
      <input class="input narrow" id="latency-max" type="number" min="0" step="1" placeholder="延迟≤ms" oninput="renderProxies()" aria-label="最大延迟">
-     <input class="input grow" id="keyword-filter" type="search" placeholder="搜索地址 / 备注" oninput="renderProxies()" aria-label="关键词">
+     <input class="input grow" id="keyword-filter" type="search" placeholder="搜索地址 / 备注 / 出口 IP" oninput="renderProxies()" aria-label="搜索地址、备注或出口 IP">
     </div>
     <div class="toolbar">
      <input class="input grow" id="manual-link" placeholder="添加手工节点: http://host:port 或 socks5://host:port" aria-label="手工节点链接">
@@ -263,9 +259,10 @@ const dashboardHTML = `<!DOCTYPE html>
  </section>
 </main>
 </div>
+</div>
 
 <div class="modal" id="import-modal"><div class="dialog"><h3>批量导入手工节点</h3><div class="form-grid"><div class="field full"><label>代理列表（每行一条 socks5/http/https URL，支持前缀/行内/行尾说明）</label><textarea id="import-text" rows="12" placeholder="prefix socks5://1.2.3.4:1080 suffix&#10;http://5.6.7.8:8080 备注可忽略"></textarea></div><div class="field"><label>地域</label><input id="import-region" maxlength="2" placeholder="可选"></div><div class="field"><label>备注</label><input id="import-note" placeholder="可选"></div></div><div class="dialog-actions"><button class="btn" onclick="document.getElementById('import-modal').classList.remove('show')">取消</button><button class="btn primary" onclick="importManualNodes()">导入</button></div></div></div>
-<div class="modal" id="sub-modal"><div class="dialog"><h3>添加订阅</h3><div class="form-grid"><div class="field"><label>名称</label><input id="sub-name" placeholder="primary subscription"></div><div class="field"><label>刷新间隔（分钟）</label><input id="sub-refresh" type="number" value="60" min="10" step="10"></div><div class="field full"><label>订阅 URL</label><input id="sub-url" placeholder="https://example.com/sub"></div><div class="field full"><label>或粘贴配置文件内容</label><textarea id="sub-file-content" placeholder="Clash YAML / V2ray / Base64 / plain text"></textarea></div><div class="field full"><label>自定义请求头（可选，JSON）</label><textarea id="sub-headers" placeholder="{&#34;User-Agent&#34;:&#34;clash&#34;}"></textarea></div></div><div class="dialog-actions"><button class="btn" onclick="closeSubModal()">取消</button><button class="btn primary" onclick="addSubscription()">添加</button></div></div></div>
+<div class="modal" id="sub-modal"><div class="dialog"><h3 id="sub-modal-title">添加订阅</h3><input type="hidden" id="sub-edit-id" value=""><div class="form-grid"><div class="field"><label>名称</label><input id="sub-name" placeholder="primary subscription"></div><div class="field"><label>刷新间隔（分钟）</label><input id="sub-refresh" type="number" value="60" min="10" step="10"></div><div class="field full"><label>订阅 URL</label><input id="sub-url" placeholder="https://example.com/sub"></div><div class="field full" id="sub-file-field"><label>或粘贴配置文件内容</label><textarea id="sub-file-content" placeholder="Clash YAML / V2ray / Base64 / plain text"></textarea></div><div class="field full"><label>自定义请求头（可选，JSON）</label><textarea id="sub-headers" placeholder="{&#34;User-Agent&#34;:&#34;clash&#34;}"></textarea></div></div><div class="dialog-actions"><button class="btn" onclick="closeSubModal()">取消</button><button class="btn primary" id="sub-modal-submit" onclick="submitSubscription()">添加</button></div></div></div>
 <div class="modal" id="apikey-once-modal"><div class="dialog"><h3>API Key 已创建</h3><p class="muted">明文仅显示一次，请立即复制保存。关闭后无法再次查看。</p><div class="field full"><label>名称</label><input id="apikey-once-name" readonly></div><div class="field full"><label>Key（仅显示一次）</label><input id="apikey-once-key" readonly style="font-family:monospace"></div><div class="dialog-actions"><button class="btn" onclick="navigator.clipboard.writeText(document.getElementById('apikey-once-key').value).then(()=>showToast('已复制')).catch(()=>showToast('复制失败'))">复制</button><button class="btn primary" onclick="document.getElementById('apikey-once-modal').classList.remove('show')">关闭</button></div></div></div>
 <div class="toast" id="toast"></div>
 <script src="/assets/dashboard.js"></script>
