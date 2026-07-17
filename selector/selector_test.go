@@ -56,6 +56,16 @@ func (s fakeStore) GetProxyByID(id int64) (*storage.Proxy, error) {
 	return nil, errors.New("not found")
 }
 
+func (s fakeStore) GetProxyByAddress(address string) (*storage.Proxy, error) {
+	for _, proxy := range s.proxies {
+		if proxy.Address == address {
+			copy := proxy
+			return &copy, nil
+		}
+	}
+	return nil, errors.New("not found")
+}
+
 func (s fakeStore) IsSubscriptionPaused(id int64) (bool, error) {
 	if id <= 0 {
 		return false, nil
@@ -243,5 +253,83 @@ func TestPickForSessionStableForSharedAddressAcrossInputOrder(t *testing.T) {
 	}
 	if pickedA.ID != pickedB.ID {
 		t.Fatalf("same session/shared address picked IDs %d and %d after input reorder", pickedA.ID, pickedB.ID)
+	}
+}
+
+// TestResolvePinnedNodeHitsExactAddress: -node- 锁定命中指定入口地址，绕过地域选路。
+func TestResolvePinnedNodeHitsExactAddress(t *testing.T) {
+	store := fakeStore{proxies: []storage.Proxy{
+		{ID: 1, Address: "us-a:8080", Region: "us", Latency: 10, Status: "active"},
+		{ID: 2, Address: "us-b:8080", Region: "us", Latency: 5, Status: "active"},
+	}}
+	proxy, err := Resolve(store, nil, auth.ParsedUsername{Node: "us-a:8080"}, nil)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if proxy.ID != 1 {
+		t.Fatalf("Resolve() pinned proxy ID = %d, want 1 (exact address, not lowest latency)", proxy.ID)
+	}
+}
+
+// TestResolvePinnedNodeMissingReturnsErrNoNode: 锁定地址不存在必须显式失败，不回退选路。
+func TestResolvePinnedNodeMissingReturnsErrNoNode(t *testing.T) {
+	store := fakeStore{proxies: []storage.Proxy{
+		{ID: 1, Address: "us-a:8080", Region: "us", Latency: 10, Status: "active"},
+	}}
+	if _, err := Resolve(store, nil, auth.ParsedUsername{Node: "nope:9999"}, nil); !errors.Is(err, ErrNoNode) {
+		t.Fatalf("Resolve() pinned missing err = %v, want ErrNoNode", err)
+	}
+}
+
+// TestResolvePinnedNodeUnavailableReturnsErrNoNode: 锁定节点不可用（user_paused/失败/禁用）显式失败。
+func TestResolvePinnedNodeUnavailableReturnsErrNoNode(t *testing.T) {
+	store := fakeStore{proxies: []storage.Proxy{
+		{ID: 1, Address: "us-a:8080", Region: "us", Latency: 10, Status: "active", UserPaused: true},
+	}}
+	if _, err := Resolve(store, nil, auth.ParsedUsername{Node: "us-a:8080"}, nil); !errors.Is(err, ErrNoNode) {
+		t.Fatalf("Resolve() pinned unavailable err = %v, want ErrNoNode", err)
+	}
+}
+
+// TestResolvePinnedNodeRegionMismatchReturnsErrNoNode: 锁定节点与请求地域不符时显式失败。
+func TestResolvePinnedNodeRegionMismatchReturnsErrNoNode(t *testing.T) {
+	store := fakeStore{proxies: []storage.Proxy{
+		{ID: 1, Address: "jp-a:8080", Region: "jp", Latency: 10, Status: "active"},
+	}}
+	if _, err := Resolve(store, nil, auth.ParsedUsername{Region: "us", Node: "jp-a:8080"}, nil); !errors.Is(err, ErrNoNode) {
+		t.Fatalf("Resolve() pinned region mismatch err = %v, want ErrNoNode", err)
+	}
+}
+
+// TestResolvePinnedNodeExcludedReturnsErrNoNode: 锁定节点被 excludes 命中（如刚失败）时显式失败。
+func TestResolvePinnedNodeExcludedReturnsErrNoNode(t *testing.T) {
+	store := fakeStore{proxies: []storage.Proxy{
+		{ID: 1, Address: "us-a:8080", Region: "us", Latency: 10, Status: "active"},
+	}}
+	if _, err := Resolve(store, nil, auth.ParsedUsername{Node: "us-a:8080"}, []int64{1}); !errors.Is(err, ErrNoNode) {
+		t.Fatalf("Resolve() pinned excluded err = %v, want ErrNoNode", err)
+	}
+}
+
+// TestResolvePinnedNodeParentSubscriptionPausedReturnsErrNoNode: 父订阅暂停时锁定也不得命中。
+func TestResolvePinnedNodeParentSubscriptionPausedReturnsErrNoNode(t *testing.T) {
+	store := fakeStore{
+		proxies: []storage.Proxy{
+			{ID: 1, Address: "us-a:8080", Region: "us", Latency: 10, Status: "active", Source: storage.SourceSubscription, SubscriptionID: 9},
+		},
+		pausedSubs: map[int64]bool{9: true},
+	}
+	if _, err := Resolve(store, nil, auth.ParsedUsername{Node: "us-a:8080"}, nil); !errors.Is(err, ErrNoNode) {
+		t.Fatalf("Resolve() pinned paused-parent err = %v, want ErrNoNode", err)
+	}
+}
+
+// TestResolvePinnedNodeUnlockFilterReturnsErrNoNode: 锁定节点不满足 unlock 过滤时显式失败。
+func TestResolvePinnedNodeUnlockFilterReturnsErrNoNode(t *testing.T) {
+	store := fakeStore{proxies: []storage.Proxy{
+		{ID: 1, Address: "us-a:8080", Region: "us", Latency: 10, Status: "active", CFBlocked: 1},
+	}}
+	if _, err := Resolve(store, nil, auth.ParsedUsername{Node: "us-a:8080", Unlock: []string{"cf"}}, nil); !errors.Is(err, ErrNoNode) {
+		t.Fatalf("Resolve() pinned unlock-fail err = %v, want ErrNoNode", err)
 	}
 }

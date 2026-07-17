@@ -36,6 +36,21 @@ func TestParseUsername(t *testing.T) {
 			raw:  "team-username-region-hk-session-s1",
 			want: ParsedUsername{Base: "team-username", Region: "hk", Session: "s1"},
 		},
+		{
+			name: "node pins entrance address",
+			raw:  "username-node-1.2.3.4:7801",
+			want: ParsedUsername{Base: "username", Node: "1.2.3.4:7801"},
+		},
+		{
+			name: "node with region and session in canonical order",
+			raw:  "username-region-us-node-1.2.3.4:7801-session-s1",
+			want: ParsedUsername{Base: "username", Region: "us", Node: "1.2.3.4:7801", Session: "s1"},
+		},
+		{
+			name: "node with hostname",
+			raw:  "username-node-node-a.example.com:1080",
+			want: ParsedUsername{Base: "username", Node: "node-a.example.com:1080"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -45,7 +60,7 @@ func TestParseUsername(t *testing.T) {
 				t.Fatalf("ParseUsername(%q) returned error: %v", tt.raw, err)
 			}
 
-			if got.Base != tt.want.Base || got.Region != tt.want.Region || got.Session != tt.want.Session || !reflect.DeepEqual(got.Unlock, tt.want.Unlock) {
+			if got.Base != tt.want.Base || got.Region != tt.want.Region || got.Session != tt.want.Session || got.Node != tt.want.Node || !reflect.DeepEqual(got.Unlock, tt.want.Unlock) {
 				t.Fatalf("ParseUsername(%q) = %#v, want %#v", tt.raw, got, tt.want)
 			}
 		})
@@ -71,6 +86,11 @@ func TestParseUsernameRejectsMalformedDSL(t *testing.T) {
 		{name: "duplicate region is invalid", raw: "username-region-us-region-jp"},
 		{name: "duplicate session is invalid", raw: "username-session-x-session-y"},
 		{name: "unknown suffix after region is invalid", raw: "username-region-us-extra-x"},
+		{name: "missing node value", raw: "username-node-"},
+		{name: "node without port", raw: "username-node-1.2.3.4"},
+		{name: "node with non-numeric port", raw: "username-node-1.2.3.4:abc"},
+		{name: "node before unlock is invalid", raw: "username-node-1.2.3.4:8080-unlock-gpt"},
+		{name: "duplicate node is invalid", raw: "username-node-1.2.3.4:8080-node-5.6.7.8:1080"},
 	}
 
 	for _, tt := range tests {

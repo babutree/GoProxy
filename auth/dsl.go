@@ -9,7 +9,7 @@ import (
 const maxSessionLength = 64
 
 // ParsedUsername is the routing DSL carried in proxy auth username.
-// Syntax: <base>[-region-<cc>][-unlock-<token>][-session-<id>]
+// Syntax: <base>[-region-<cc>][-unlock-<token>][-session-<id>][-node-<addr>]
 // unlock token: gpt|openai|chatgpt|claude|gemini|grok|cf|all
 // all => openai+claude+grok+gemini+cf (AND).
 type ParsedUsername struct {
@@ -18,7 +18,17 @@ type ParsedUsername struct {
 	Session string
 	// Unlock is the normalized list of required unlock signals (openai/claude/grok/gemini/cf).
 	Unlock []string
+	// Node pins routing to a single node by its dial address (host:port), i.e. the
+	// gateway ENTRANCE address (the node's own identity), not the observed exit IP.
+	// When set, selection bypasses session affinity and picks exactly this node,
+	// provided it still passes availability/region/unlock/subscription checks.
+	// Chained/realm upstreams mean the final exit IP may still differ from this
+	// address and may drift; the gateway can only guarantee the entrance node.
+	Node string
 }
+
+// maxNodeLength caps the pinned node address token length (host:port).
+const maxNodeLength = 255
 
 func ParseUsername(raw string) (ParsedUsername, error) {
 	if raw == "" {
@@ -28,7 +38,8 @@ func ParseUsername(raw string) (ParsedUsername, error) {
 	regionStart := strings.Index(raw, "-region-")
 	unlockStart := strings.Index(raw, "-unlock-")
 	sessionStart := strings.Index(raw, "-session-")
-	baseEnd := firstMarker(regionStart, unlockStart, sessionStart, len(raw))
+	nodeStart := strings.Index(raw, "-node-")
+	baseEnd := firstMarker(regionStart, unlockStart, sessionStart, nodeStart, len(raw))
 	if baseEnd == 0 {
 		return ParsedUsername{}, fmt.Errorf("base username is empty")
 	}
@@ -54,6 +65,15 @@ func ParseUsername(raw string) (ParsedUsername, error) {
 			return ParsedUsername{}, err
 		}
 		parsed.Unlock = unlock
+		remainder = rest
+	}
+
+	if strings.HasPrefix(remainder, "-node-") {
+		node, rest, err := parseNode(remainder[len("-node-"):])
+		if err != nil {
+			return ParsedUsername{}, err
+		}
+		parsed.Node = node
 		remainder = rest
 	}
 
@@ -176,8 +196,52 @@ func splitValue(raw string) (string, string) {
 	regionStart := strings.Index(raw, "-region-")
 	unlockStart := strings.Index(raw, "-unlock-")
 	sessionStart := strings.Index(raw, "-session-")
-	valueEnd := firstMarker(regionStart, unlockStart, sessionStart, len(raw))
+	nodeStart := strings.Index(raw, "-node-")
+	valueEnd := firstMarker(regionStart, unlockStart, sessionStart, nodeStart, len(raw))
 	return raw[:valueEnd], raw[valueEnd:]
+}
+
+// parseNode 解析 -node- 后的入口地址（host:port）。
+// 仅锁定网关拨号的入口节点身份；不校验/不保证最终出口 IP（链式/realm 上游可能不同或漂移）。
+// host:port 中含冒号，不能复用 splitValue（其按 DSL marker 切分即可，冒号不是 marker）。
+func parseNode(raw string) (string, string, error) {
+	value, rest := splitValue(raw)
+	if value == "" {
+		return "", "", fmt.Errorf("node address is empty")
+	}
+	if len(value) > maxNodeLength {
+		return "", "", fmt.Errorf("node address exceeds %d characters", maxNodeLength)
+	}
+	if !isNodeAddress(value) {
+		return "", "", fmt.Errorf("node address must be host:port")
+	}
+	return value, rest, nil
+}
+
+// isNodeAddress 校验 host:port 形态：必须恰有一个冒号，端口为数字，host 非空。
+// host 允许字母数字、点、连字符（域名/IPv4）；不支持 IPv6 字面量（含多个冒号），
+// 与现有节点 Address 存储口径（host:port 文本键）一致。
+func isNodeAddress(value string) bool {
+	colon := strings.LastIndex(value, ":")
+	if colon <= 0 || colon == len(value)-1 {
+		return false
+	}
+	host, port := value[:colon], value[colon+1:]
+	if strings.Contains(host, ":") {
+		return false
+	}
+	for _, r := range host {
+		if r == '.' || r == '-' || unicode.IsDigit(r) || isASCIIAlpha(r) {
+			continue
+		}
+		return false
+	}
+	for _, r := range port {
+		if !unicode.IsDigit(r) {
+			return false
+		}
+	}
+	return true
 }
 
 func isAlpha(value string) bool {

@@ -31,6 +31,9 @@ var afterFirstBindPickHook func()
 type Store interface {
 	GetByRegion(region string, excludes []int64) ([]storage.Proxy, error)
 	GetProxyByID(id int64) (*storage.Proxy, error)
+	// GetProxyByAddress 按拨号地址（host:port，节点身份键）查询单个节点。
+	// 用于 -node- 锁定：直接命中指定入口节点。地址不唯一/不存在时返回 error。
+	GetProxyByAddress(address string) (*storage.Proxy, error)
 	// IsSubscriptionPaused 报告父订阅是否暂停；id<=0（手工节点）恒为 false。
 	IsSubscriptionPaused(id int64) (bool, error)
 }
@@ -56,6 +59,13 @@ func PickUnlock(store Store, region string, excludes []int64, unlock []string) (
 }
 
 func Resolve(store Store, sessions *affinity.Store, route auth.ParsedUsername, excludes []int64) (*storage.Proxy, error) {
+	// -node- 锁定优先：直接命中指定入口节点，绕过地域选路与会话亲和。
+	// 仍须通过可用性/地域/unlock/父订阅校验；被 excludes 命中或校验失败则返回 ErrNoNode。
+	// 注意：锁定的是网关拨号的入口地址（节点身份），最终出口 IP 由该节点上游链路决定，
+	// 链式/realm 转发时可能与入口不同或漂移，网关无法感知或保证。
+	if route.Node != "" {
+		return resolvePinnedNode(store, route, excludes)
+	}
 	if route.Session == "" {
 		return PickUnlock(store, route.Region, excludes, route.Unlock)
 	}
@@ -87,6 +97,35 @@ func Resolve(store Store, sessions *affinity.Store, route auth.ParsedUsername, e
 	sessions.SetProxy(route.Session, proxy.ID, proxy.Address, proxy.Region)
 	if cooldownMinutes > 0 {
 		sessions.SetCooldown(proxy.ID, sessionsNow(sessions).Add(time.Duration(cooldownMinutes)*time.Minute))
+	}
+	return proxy, nil
+}
+
+// resolvePinnedNode 按入口地址精确命中单一节点（-node- 锁定）。
+// 校验顺序：excludes → 存在 → 可用 → 地域匹配 → unlock 过滤 → 父订阅未暂停。
+// 任一不满足返回 ErrNoNode（不回退到普通选路，锁定语义必须显式失败）。
+func resolvePinnedNode(store Store, route auth.ParsedUsername, excludes []int64) (*storage.Proxy, error) {
+	proxy, err := store.GetProxyByAddress(route.Node)
+	if err != nil || proxy == nil {
+		return nil, noNodeError(route.Region)
+	}
+	if excluded(proxy.ID, excludes) {
+		return nil, noNodeError(route.Region)
+	}
+	if !proxyAvailable(*proxy) {
+		return nil, noNodeError(route.Region)
+	}
+	if regionMismatch(proxy.Region, route.Region) {
+		return nil, noNodeError(route.Region)
+	}
+	if !proxyMatchesUnlock(*proxy, route.Unlock) {
+		return nil, noNodeError(route.Region)
+	}
+	if proxy.SubscriptionID > 0 {
+		paused, err := store.IsSubscriptionPaused(proxy.SubscriptionID)
+		if err != nil || paused {
+			return nil, noNodeError(route.Region)
+		}
 	}
 	return proxy, nil
 }

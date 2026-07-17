@@ -84,12 +84,12 @@ client's proxy-username field.
 The full username has the form (**fixed order**):
 
 ```
-<base>[-region-<cc>][-unlock-<token>][-session-<id>]
+<base>[-region-<cc>][-unlock-<token>][-node-<host:port>][-session-<id>]
 ```
 
 Suffixes are optional, but when present they must appear in this order:
-`region` → `unlock` → `session`. A wrong order fails **username parsing**, so
-authentication fails even if the base password is correct.
+`region` → `unlock` → `node` → `session`. A wrong order fails **username
+parsing**, so authentication fails even if the base password is correct.
 
 For example, `username-region-jp-session-browser` is parsed as:
 
@@ -113,6 +113,16 @@ credentials.
 | `username-session-browser` | Bind session key `browser` to one node for the configured TTL. |
 | `username-region-jp-session-app01` | `jp` region + sticky session `app01`. |
 | `username-region-jp-unlock-gpt-session-app01` | `jp` region + unlock filter `gpt` + sticky session `app01`. |
+| `username-node-1.2.3.4:7801` | Pin routing to the node whose dial address is `1.2.3.4:7801`. |
+
+> **`-node-` pins the ENTRANCE node, not the exit IP.** The value is the node's
+> own dial address (host:port), i.e. its identity in the pool — the address the
+> gateway connects to. It bypasses region selection and session affinity and
+> routes exactly to that node, as long as it still passes
+> availability/region/unlock/parent-subscription checks (otherwise the request
+> fails; there is no fallback). With chained proxies or realm forwarding the
+> final exit IP the target site sees may differ from this address and may drift;
+> the gateway can only guarantee the entrance node, not the upstream exit.
 
 > Replace `username` with the configured proxy username (default `username`, editable in
 > the WebUI Settings). If your base username is `myuser`, the strings become

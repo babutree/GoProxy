@@ -109,7 +109,7 @@ const dashboardHTML = `<!DOCTYPE html>
      <div class="conn-item"><div class="k">密码</div><div class="v" id="conn-pass">见首次启动日志 / 系统设置</div><div class="desc" id="conn-auth-state">代理认证状态</div></div>
     </div>
     <div class="cmd" id="conn-cmd">curl --socks5 username:PASSWORD@127.0.0.1:7801 https://www.gstatic.com/generate_204</div>
-    <div class="hint" id="dsl-hint">前缀 “username” = 代理认证用户名；-region-XX 地域；-unlock-gpt|claude|gemini|grok|cf|all 解锁过滤；-session-ID 黏连。</div>
+    <div class="hint" id="dsl-hint">前缀 “username” = 代理认证用户名；-region-XX 地域；-unlock-gpt|claude|gemini|grok|cf|all 解锁过滤；-node-IP:端口 锁定入口节点(出口可能因上游漂移)；-session-ID 黏连。</div>
     <div id="dsl-examples" hidden></div>
     <div class="notice"><span>⚠️</span><span><b>「出口 IP」不是连接地址</b>，须走网关端口 + 认证。</span></div>
    </div>
