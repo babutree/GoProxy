@@ -54,12 +54,15 @@ func (s *Storage) CountAll() (int, error) {
 	return count, err
 }
 
-// CountAvailableByProtocol 按协议统计所有可用节点数量
+// CountAvailableByProtocol 按入口协议统计可用节点数量。
+// dual_protocol=1（sing-box mixed）同时计入 http 与 socks5：与节点列表徽章一致，
+// 避免「列表显示几百 SOCKS5+HTTP 但顶部 HTTP 可用只有纯 protocol=http 的 2 个」。
 func (s *Storage) CountAvailableByProtocol(protocol string) (int, error) {
 	var count int
 	err := s.db.QueryRow(
 		`SELECT COUNT(*) FROM proxies
-		 WHERE status IN ('active', 'degraded') AND user_paused = 0 AND fail_count < 3 AND protocol = ?
+		 WHERE status IN ('active', 'degraded') AND user_paused = 0 AND fail_count < 3
+		   AND (protocol = ? OR dual_protocol = 1)
 		   AND NOT EXISTS (SELECT 1 FROM subscriptions WHERE subscriptions.id = proxies.subscription_id AND subscriptions.status = 'paused')`,
 		protocol,
 	).Scan(&count)

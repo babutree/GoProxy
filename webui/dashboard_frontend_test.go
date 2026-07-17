@@ -148,7 +148,7 @@ func TestDashboardNodeStateAndRegionDistributionUseAvailableKnownRegions(t *test
 		// BUG-51: allRegions/地域分布均经 isAvailable 过滤，因此不再计入 user_paused 节点。
 		"allRegions=Array.from(new Set(allProxies.filter(p=>isAvailable(p)&&isKnownRegion(p)).map(regionOf))).sort()",
 		"allProxies.filter(p=>isAvailable(p)&&isKnownRegion(p)).forEach",
-		"个可用节点",
+		"个可用",
 		"暂无可用地域数据",
 	}
 	for _, check := range checks {
@@ -750,12 +750,14 @@ func TestDashboardOrbitThemeTokens(t *testing.T) {
 
 // TestDashboardOrbitSessionBeamsMatchQuality 会话连线按地区+品质匹配卫星，
 // 禁止仅按地区把 S/A/B/C 全档点亮。D 档不进轨道是产品预期（byQ 仅 s/a/b/c）。
+// 会话品质空/D 时须能回退到该地区现有轨道，避免 US 会话完全无连线。
 func TestDashboardOrbitSessionBeamsMatchQuality(t *testing.T) {
 	checks := []string{
 		"function orbitSessionQualityTrack(",
-		"const key=r+'|'+q",
+		"function orbitSessionBeamKey(",
 		"b.k=sessCount[b.cc+'|'+b.q]||0",
 		"const byQ={s:[],a:[],b:[],c:[]}",
+		"regionTracks",
 	}
 	for _, check := range checks {
 		t.Run(check, func(t *testing.T) {
@@ -771,6 +773,42 @@ func TestDashboardOrbitSessionBeamsMatchQuality(t *testing.T) {
 	// D 档不得进入 byQ（轨道不展示 D 是正确产品行为）。
 	if strings.Contains(dashboardBundle, "const byQ={s:[],a:[],b:[],c:[],d:[]}") {
 		t.Fatal("dashboard must not place D-grade satellites on orbit tracks")
+	}
+}
+
+// TestDashboardSessionRegionReqNoExtraDash DSL 地域请求展示为 region-ca，不得出现 -region-ca。
+func TestDashboardSessionRegionReqNoExtraDash(t *testing.T) {
+	if !strings.Contains(dashboardBundle, "return 'region-'+r") {
+		t.Fatal("sessionRegionReq must render region-xx without leading dash")
+	}
+	if strings.Contains(dashboardBundle, "return '-region-'+r") {
+		t.Fatal("sessionRegionReq still has extra leading dash before region-")
+	}
+}
+
+// TestDashboardRegionDistributionRichPanel 地域分布：倒序、中文国家名列、TopN 不足则全显、查看全部页。
+func TestDashboardRegionDistributionRichPanel(t *testing.T) {
+	checks := []string{
+		"function buildRegionStats(",
+		"function regionDisplayName(",
+		"function regionPanelHTML(",
+		"const REGION_OVERVIEW_LIMIT=10",
+		"国家/地区",
+		`id="page-regions"`,
+		`id="region-page-list"`,
+		`switchTab('regions')`,
+		"REGION_ZH",
+		"ca:'加拿大'",
+		"us:'美国'",
+		"nl:'荷兰'",
+		"margin-top:40px",
+	}
+	for _, check := range checks {
+		t.Run(check, func(t *testing.T) {
+			if !strings.Contains(dashboardBundle, check) && !strings.Contains(dashboardHTML, check) {
+				t.Fatalf("missing region distribution invariant %q", check)
+			}
+		})
 	}
 }
 

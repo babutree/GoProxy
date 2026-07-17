@@ -18,8 +18,9 @@ const dashboardHTML = `<!DOCTYPE html>
   <button class="navitem active" data-tab="overview" onclick="switchTab('overview')" title="总览" aria-label="总览"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><ellipse cx="12" cy="12" rx="10" ry="4.5"/><ellipse cx="12" cy="12" rx="4.5" ry="10"/></svg></span><span class="lbl t">总览</span></button>
   <button class="navitem" data-tab="nodes" onclick="switchTab('nodes')" title="节点" aria-label="节点"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="5" cy="6" r="2"/><circle cx="5" cy="18" r="2"/><circle cx="19" cy="12" r="2"/><path d="M7 6h6M7 18h6M13 6c0 4 4 3 4 6M13 18c0-4 4-3 4-6"/></svg></span><span class="lbl t">节点</span></button>
   <button class="navitem" data-tab="subs" onclick="switchTab('subs')" title="订阅" aria-label="订阅"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 11a9 9 0 0 1 9 9"/><path d="M4 4a16 16 0 0 1 16 16"/><circle cx="5" cy="19" r="1.5" fill="currentColor" stroke="none"/></svg></span><span class="lbl t">订阅</span></button>
-  <button class="navitem" data-tab="sessions" onclick="switchTab('sessions')" title="会话" aria-label="会话"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg></span><span class="lbl t">会话</span></button>
-  <div class="lab">运维</div>
+   <button class="navitem" data-tab="sessions" onclick="switchTab('sessions')" title="会话" aria-label="会话"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg></span><span class="lbl t">会话</span></button>
+   <button class="navitem" data-tab="regions" onclick="switchTab('regions')" title="地域" aria-label="地域"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg></span><span class="lbl t">地域</span></button>
+   <div class="lab">运维</div>
   <button class="navitem" data-tab="logs" onclick="switchTab('logs')" title="日志" aria-label="日志"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 3h9l3 3v15H6z"/><path d="M9 9h6M9 13h6M9 17h4"/></svg></span><span class="lbl t">日志</span></button>
   <button class="navitem" data-tab="api" onclick="switchTab('api')" title="API" aria-label="API"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/><circle cx="12" cy="12" r="2.5"/></svg></span><span class="lbl t">API</span></button>
   <button class="navitem" data-tab="settings" onclick="switchTab('settings')" title="设置" aria-label="设置"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></span><span class="lbl t">设置</span></button>
@@ -47,8 +48,8 @@ const dashboardHTML = `<!DOCTYPE html>
  <section class="page active" id="page-overview">
   <div class="metrics">
    <div class="metric"><div class="label k">上游节点</div><div class="value v num" id="stat-total">--</div><div class="note n">可用 / 降级</div></div>
-   <div class="metric"><div class="label k">HTTP 可用</div><div class="value v num" id="stat-http">--</div><div class="note n">入口节点</div></div>
-   <div class="metric"><div class="label k">SOCKS5 可用</div><div class="value v num" id="stat-socks5">--</div><div class="note n">入口节点</div></div>
+    <div class="metric"><div class="label k">HTTP 可用</div><div class="value v num" id="stat-http">--</div><div class="note n">含 mixed 双入口</div></div>
+    <div class="metric"><div class="label k">SOCKS5 可用</div><div class="value v num" id="stat-socks5">--</div><div class="note n">含 mixed 双入口</div></div>
    <div class="metric"><div class="label k">订阅可用</div><div class="value v num" id="stat-subscription">--</div><div class="note n">订阅来源</div></div>
    <div class="metric"><div class="label k">活跃会话</div><div class="value v num" id="stat-sessions">--</div><div class="note n">当前绑定</div></div>
   </div>
@@ -111,13 +112,21 @@ const dashboardHTML = `<!DOCTYPE html>
    </div>
 
    <div class="card" style="margin-top:16px">
-    <div class="card-head card-h"><h3>地域分布</h3><span class="muted sub" id="region-total">--</span></div>
-    <div class="card-body card-b"><div id="region-list"><div class="empty">加载中</div></div></div>
+    <div class="card-head card-h"><h3>地域分布</h3><span class="muted sub" id="region-total">--</span><div class="tools"><button class="mini" type="button" onclick="switchTab('regions')">查看全部</button></div></div>
+    <div class="card-body card-b"><div id="region-list" class="region-panel"><div class="empty">加载中</div></div></div>
    </div>
- </section>
+  </section>
 
- <!-- 节点 -->
- <section class="page" id="page-nodes">
+  <!-- 地域（全量） -->
+  <section class="page" id="page-regions">
+   <div class="card">
+    <div class="card-head card-h"><h3>全部地域</h3><span class="muted sub" id="region-page-total">--</span></div>
+    <div class="card-body card-b"><div id="region-page-list" class="region-panel"><div class="empty">加载中</div></div></div>
+   </div>
+  </section>
+
+  <!-- 节点 -->
+  <section class="page" id="page-nodes">
   <div class="card">
    <div class="card-head card-h">
     <h3>节点清单</h3>
