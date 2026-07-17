@@ -25,8 +25,8 @@ func TestDefaultConfigUsesPRDPortsAndGatewaySettings(t *testing.T) {
 	if cfg.WebUIPort != ":7800" {
 		t.Fatalf("WebUIPort = %q, want :7800", cfg.WebUIPort)
 	}
-	if cfg.SessionTTLMinutes != 10 {
-		t.Fatalf("SessionTTLMinutes = %d, want 10", cfg.SessionTTLMinutes)
+	if cfg.SessionTTLMinutes != 1440 {
+		t.Fatalf("SessionTTLMinutes = %d, want 1440", cfg.SessionTTLMinutes)
 	}
 	if cfg.DefaultRegion != "" {
 		t.Fatalf("DefaultRegion = %q, want empty", cfg.DefaultRegion)

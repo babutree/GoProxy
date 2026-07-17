@@ -139,7 +139,7 @@ credentials.
 - Examples are all valid: `browser`, `chrome1`, `edge02`, `task-a`,
   `user_42`, `bot-us-01`.
 - **What it does:** each distinct session key is bound to a single exit node for
-  the session TTL (`SESSION_TTL_MINUTES`, default 10). Reusing the same key keeps
+  the session TTL (`SESSION_TTL_MINUTES`, default 1440 = 1 day). Reusing the same key keeps
   the same exit IP; using a different key is an independent binding that may land
   on a different node. Omitting `-session-` gives no stickiness — each request is
   routed fresh by lowest latency.
@@ -237,7 +237,7 @@ Subscription nodes are managed through subscription operations. Manual-node dele
 | `WEBUI_PORT` | `7800` | WebUI listen port. |
 | `SOCKS5_PORT` | `7801` | SOCKS5 gateway listen port. |
 | `HTTP_PORT` | `7802` | HTTP gateway listen port. |
-| `SESSION_TTL_MINUTES` | `10` | Sticky session binding TTL. |
+| `SESSION_TTL_MINUTES` | `1440` | Sticky session binding TTL (default 1 day). |
 | `MAX_SESSIONS_PER_PROXY` | `0` | Max concurrent sticky sessions per proxy (`0` = unlimited). |
 | `PROXY_COOLDOWN_MINUTES` | `0` | After a new session first-bind, other new sessions skip that node for N minutes (`0` = off). Sticky hits ignore cooldown. |
 | `DEFAULT_REGION` | empty | Optional default region for requests without `-region-`. |

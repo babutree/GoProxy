@@ -117,7 +117,7 @@ func DefaultConfig() *Config {
 		WebUIPort:              envPort("WEBUI_PORT", ":7800"),
 		ProxyAuthEnabled:       true,
 		ProxyAuthUsername:      "username",
-		SessionTTLMinutes:      envInt("SESSION_TTL_MINUTES", 10),
+		SessionTTLMinutes:      envInt("SESSION_TTL_MINUTES", 1440),
 		MaxSessionsPerProxy:    envIntNonNegative("MAX_SESSIONS_PER_PROXY", 0),
 		ProxyCooldownMinutes:   envIntNonNegative("PROXY_COOLDOWN_MINUTES", 0),
 		DefaultRegion:          NormalizeCountryCode(os.Getenv("DEFAULT_REGION")),
