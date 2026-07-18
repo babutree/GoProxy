@@ -421,6 +421,22 @@ func TestDashboardNodeOrbit(t *testing.T) {
 	}
 }
 
+// TestDashboardCopyProxyCredPrefersStableNodeKey 网关节点复制优先 -node-key-<node_key>，
+// 而非易变的 127.0.0.1:本地端口（端口回收后不再代表同一上游配置）。
+func TestDashboardCopyProxyCredPrefersStableNodeKey(t *testing.T) {
+	checks := []string{
+		"const nkey=String(p.node_key||'').trim()",
+		"btoa(unescape(encodeURIComponent(nkey)))",
+		"const user=base+'-node-'+pin",
+		"锁定节点身份，非出口IP",
+	}
+	for _, check := range checks {
+		if !strings.Contains(dashboardBundle, check) {
+			t.Fatalf("copyProxyCred missing stable identity pin %q", check)
+		}
+	}
+}
+
 // TestDashboardCopyProxyCredBuildsFullURL 验证 copyProxyCred：
 // - 网关节点：协议://用户名DSL:密码@网关入口（密码可为空占位 PASSWORD）
 // - 直连节点（手工 HTTP/SOCKS 等非 tunnel）：协议://节点自身 IP:端口，绝不拼网关密码
@@ -440,7 +456,8 @@ func TestDashboardCopyProxyCredBuildsFullURL(t *testing.T) {
 		"const pass=rawPass||'PASSWORD'",
 		"const url=scheme+'://'+encodeProxyUserInfo(user)+':'+encodeProxyUserInfo(pass)+'@'+host",
 		"function encodeProxyUserInfo(value){return encodeURIComponent(String(value||'')).replace(/[!'()*]/g,c=>'%'+c.charCodeAt(0).toString(16).toUpperCase())}",
-		"const okMsg=rawPass?'已复制':'已复制，请将 PASSWORD 替换为真实密码'",
+		"已复制，请将 PASSWORD 替换为真实密码",
+		"锁定节点身份，非出口IP",
 		"navigator.clipboard.writeText(url).then(()=>showToast(okMsg))",
 	}
 	for _, check := range checks {
@@ -802,6 +819,10 @@ func TestDashboardRegionDistributionRichPanel(t *testing.T) {
 		"us:'美国'",
 		"nl:'荷兰'",
 		"margin-top:40px",
+		"平均延迟 ",
+		"品质结构 · 平均延迟 · 会话",
+		// 代码|国家紧邻：国家列用 max-content，结构列吃剩余宽度
+		"grid-template-columns:44px max-content minmax(0,1fr) 72px",
 	}
 	for _, check := range checks {
 		t.Run(check, func(t *testing.T) {
@@ -809,6 +830,9 @@ func TestDashboardRegionDistributionRichPanel(t *testing.T) {
 				t.Fatalf("missing region distribution invariant %q", check)
 			}
 		})
+	}
+	if strings.Contains(dashboardBundle, "均延 ") {
+		t.Fatal("region panel still uses nonstandard label 均延; want 平均延迟")
 	}
 }
 

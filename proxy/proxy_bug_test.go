@@ -987,6 +987,21 @@ func (s *fakeProxyStore) GetProxyByAddress(address string) (*storage.Proxy, erro
 	return &proxy, nil
 }
 
+func (s *fakeProxyStore) GetProxyByNodeKey(nodeKey string) (*storage.Proxy, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if nodeKey == "" {
+		return nil, fmt.Errorf("proxy node_key empty")
+	}
+	for _, proxy := range s.proxies {
+		if proxy.NodeKey == nodeKey {
+			p := proxy
+			return &p, nil
+		}
+	}
+	return nil, fmt.Errorf("proxy node_key %s not found", nodeKey)
+}
+
 func (s *fakeProxyStore) RecordProxyUseByID(id int64, success bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

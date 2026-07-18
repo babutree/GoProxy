@@ -27,6 +27,7 @@
 - **地域分布**：倒序、TopN（不足则全显）、S/A/B/C/会话/均延、国家/地区中文名、查看全部页
 - **顶部协议统计**：HTTP/SOCKS5 可用计入 `dual_protocol` mixed 节点（与列表双徽章一致）
 - **会话 DSL 展示**：地域请求为 `region-xx`（去掉多余前导 `-`）
+- **节点身份锁定**：SQLite 持久化 `node_key`；订阅刷新按 key upsert 保 id；`-node-key-…` 锁定稳定配置身份（兼容旧 host:port）；复制优先输出 key DSL（非出口 IP、非临时本地端口）
 - **节点状态**：`disabled` 且无 `last_check` 显示「待验证」，有验证记录或失败次数超限显示「不可用」
 - **示例凭据**：文档/默认用户名占位改为 `username`，连接示例主机改为 `YOUR-HOST-IP`
 - **DSL 文档**：README / GEO_FILTER / CLAUDE 补齐固定顺序中的 `-unlock-`

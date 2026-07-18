@@ -66,6 +66,16 @@ func (s fakeStore) GetProxyByAddress(address string) (*storage.Proxy, error) {
 	return nil, errors.New("not found")
 }
 
+func (s fakeStore) GetProxyByNodeKey(nodeKey string) (*storage.Proxy, error) {
+	for _, proxy := range s.proxies {
+		if proxy.NodeKey == nodeKey && nodeKey != "" {
+			copy := proxy
+			return &copy, nil
+		}
+	}
+	return nil, errors.New("not found")
+}
+
 func (s fakeStore) IsSubscriptionPaused(id int64) (bool, error) {
 	if id <= 0 {
 		return false, nil
@@ -268,6 +278,30 @@ func TestResolvePinnedNodeHitsExactAddress(t *testing.T) {
 	}
 	if proxy.ID != 1 {
 		t.Fatalf("Resolve() pinned proxy ID = %d, want 1 (exact address, not lowest latency)", proxy.ID)
+	}
+}
+
+// TestResolvePinnedNodeByStableKey: -node-key- 按稳定身份命中，即使 address 是临时本地端口。
+func TestResolvePinnedNodeByStableKey(t *testing.T) {
+	store := fakeStore{proxies: []storage.Proxy{
+		{ID: 1, Address: "127.0.0.1:20009", Region: "us", Latency: 10, Status: "active", NodeKey: "trojan:up.example.com:443:deadbeef"},
+		{ID: 2, Address: "127.0.0.1:20010", Region: "us", Latency: 5, Status: "active", NodeKey: "trojan:other.example.com:443:cafebabe"},
+	}}
+	proxy, err := Resolve(store, nil, auth.ParsedUsername{Node: "key-trojan:up.example.com:443:deadbeef"}, nil)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if proxy.ID != 1 || proxy.Address != "127.0.0.1:20009" {
+		t.Fatalf("Resolve() = id=%d addr=%q, want id=1 local mixed of stable key", proxy.ID, proxy.Address)
+	}
+	// 模拟端口重分配后仍按 key 命中同一 id。
+	store.proxies[0].Address = "127.0.0.1:30001"
+	proxy, err = Resolve(store, nil, auth.ParsedUsername{Node: "key-trojan:up.example.com:443:deadbeef"}, nil)
+	if err != nil {
+		t.Fatalf("Resolve() after rebind error = %v", err)
+	}
+	if proxy.ID != 1 || proxy.Address != "127.0.0.1:30001" {
+		t.Fatalf("Resolve() after rebind = id=%d addr=%q, want same identity new port", proxy.ID, proxy.Address)
 	}
 }
 

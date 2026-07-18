@@ -51,6 +51,18 @@ func TestParseUsername(t *testing.T) {
 			raw:  "username-node-node-a.example.com:1080",
 			want: ParsedUsername{Base: "username", Node: "node-a.example.com:1080"},
 		},
+		{
+			name: "node key stable identity (base64url wire)",
+			// NodeKey "trojan:a.example.com:443:deadbeef" → base64url
+			raw:  "username-node-key-" + EncodeNodeKeyPin("trojan:a.example.com:443:deadbeef"),
+			want: ParsedUsername{Base: "username", Node: "key-trojan:a.example.com:443:deadbeef"},
+		},
+		{
+			name: "node key with region and session and marker-like hostname",
+			// 主机名含 -session- 不得误切；wire 为 base64url，解析后还原原文。
+			raw:  "username-region-us-node-key-" + EncodeNodeKeyPin("vless:cdn-session-01.example.com:443:abcd1234") + "-session-s1",
+			want: ParsedUsername{Base: "username", Region: "us", Node: "key-vless:cdn-session-01.example.com:443:abcd1234", Session: "s1"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -91,6 +103,9 @@ func TestParseUsernameRejectsMalformedDSL(t *testing.T) {
 		{name: "node with non-numeric port", raw: "username-node-1.2.3.4:abc"},
 		{name: "node before unlock is invalid", raw: "username-node-1.2.3.4:8080-unlock-gpt"},
 		{name: "duplicate node is invalid", raw: "username-node-1.2.3.4:8080-node-5.6.7.8:1080"},
+		{name: "empty node key", raw: "username-node-key-"},
+		{name: "node key with illegal wire char", raw: "username-node-key-bad/key"},
+		{name: "node key invalid base64url payload", raw: "username-node-key-@@@@"},
 	}
 
 	for _, tt := range tests {

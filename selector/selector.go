@@ -31,9 +31,11 @@ var afterFirstBindPickHook func()
 type Store interface {
 	GetByRegion(region string, excludes []int64) ([]storage.Proxy, error)
 	GetProxyByID(id int64) (*storage.Proxy, error)
-	// GetProxyByAddress 按拨号地址（host:port，节点身份键）查询单个节点。
-	// 用于 -node- 锁定：直接命中指定入口节点。地址不唯一/不存在时返回 error。
+	// GetProxyByAddress 按拨号地址（host:port）查询单个节点。
+	// 用于兼容旧 -node-host:port；地址不唯一/不存在时返回 error。
 	GetProxyByAddress(address string) (*storage.Proxy, error)
+	// GetProxyByNodeKey 按稳定配置身份查询（-node-key-…）。
+	GetProxyByNodeKey(nodeKey string) (*storage.Proxy, error)
 	// IsSubscriptionPaused 报告父订阅是否暂停；id<=0（手工节点）恒为 false。
 	IsSubscriptionPaused(id int64) (bool, error)
 }
@@ -101,11 +103,20 @@ func Resolve(store Store, sessions *affinity.Store, route auth.ParsedUsername, e
 	return proxy, nil
 }
 
-// resolvePinnedNode 按入口地址精确命中单一节点（-node- 锁定）。
+// resolvePinnedNode 按 -node- 令牌命中单一节点。
+// 支持 key-<nodeKey>（稳定身份）与 host:port（兼容旧复制）。
 // 校验顺序：excludes → 存在 → 可用 → 地域匹配 → unlock 过滤 → 父订阅未暂停。
 // 任一不满足返回 ErrNoNode（不回退到普通选路，锁定语义必须显式失败）。
 func resolvePinnedNode(store Store, route auth.ParsedUsername, excludes []int64) (*storage.Proxy, error) {
-	proxy, err := store.GetProxyByAddress(route.Node)
+	var (
+		proxy *storage.Proxy
+		err   error
+	)
+	if strings.HasPrefix(route.Node, "key-") {
+		proxy, err = store.GetProxyByNodeKey(strings.TrimPrefix(route.Node, "key-"))
+	} else {
+		proxy, err = store.GetProxyByAddress(route.Node)
+	}
 	if err != nil || proxy == nil {
 		return nil, noNodeError(route.Region)
 	}

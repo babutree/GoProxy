@@ -209,17 +209,16 @@ func TestProxyColumnsMatchScanProxy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rows.Columns(): %v", err)
 	}
-	// 当前模型：id..note(20) + ipapiis_score + ipapi_flags + ipapi_flags_seen + starred + cf_blocked + dual_protocol + ai_reachability + proxy_username + proxy_password = 29 列。硬编码断言，防止任一侧漏改。
-	if len(cols) != 29 {
-		t.Fatalf("proxyColumns yields %d columns, want 29 (id..note + risk columns + starred + cf_blocked + dual_protocol + ai_reachability + proxy_username + proxy_password)", len(cols))
+	// 当前模型：… + proxy_username + proxy_password + node_key = 30 列。硬编码断言，防止任一侧漏改。
+	if len(cols) != 30 {
+		t.Fatalf("proxyColumns yields %d columns, want 30 (… + proxy_username + proxy_password + node_key)", len(cols))
 	}
-	// 最后两列必须与 scanProxy 末尾新增的凭据字段对齐。
-	if cols[len(cols)-2] != "proxy_username" || cols[len(cols)-1] != "proxy_password" {
-		t.Fatalf("last two SELECT columns = %q,%q, want proxy_username,proxy_password", cols[len(cols)-2], cols[len(cols)-1])
+	// 末列必须是稳定身份 node_key；凭据字段紧邻其前。
+	if cols[len(cols)-1] != "node_key" {
+		t.Fatalf("last SELECT column = %q, want node_key", cols[len(cols)-1])
 	}
-	// dual_protocol + ai_reachability 仍须紧邻凭据字段之前。
-	if cols[len(cols)-4] != "dual_protocol" || cols[len(cols)-3] != "ai_reachability" {
-		t.Fatalf("columns before credentials = %q,%q, want dual_protocol,ai_reachability", cols[len(cols)-4], cols[len(cols)-3])
+	if cols[len(cols)-3] != "proxy_username" || cols[len(cols)-2] != "proxy_password" {
+		t.Fatalf("credential columns = %q,%q, want proxy_username,proxy_password", cols[len(cols)-3], cols[len(cols)-2])
 	}
 
 	if !rows.Next() {

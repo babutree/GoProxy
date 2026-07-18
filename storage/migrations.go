@@ -57,12 +57,18 @@ func (s *Storage) migrateRequiredProxyColumns() error {
 		{name: "ai_reachability", sql: `ALTER TABLE proxies ADD COLUMN ai_reachability TEXT NOT NULL DEFAULT ''`},
 		{name: "proxy_username", sql: `ALTER TABLE proxies ADD COLUMN proxy_username TEXT NOT NULL DEFAULT ''`},
 		{name: "proxy_password", sql: `ALTER TABLE proxies ADD COLUMN proxy_password TEXT NOT NULL DEFAULT ''`},
+		{name: "node_key", sql: `ALTER TABLE proxies ADD COLUMN node_key TEXT NOT NULL DEFAULT ''`},
 	}
 
 	for _, column := range columns {
 		if err := s.addProxyColumnIfMissing(column.name, column.sql); err != nil {
 			return err
 		}
+	}
+	// 非空 node_key 上建索引，加速 -node-key- 锁定与订阅 upsert。
+	// 不建全局 UNIQUE：历史空串可多行；业务层用 (subscription_id, node_key) 语义保证隧道唯一。
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_proxies_node_key ON proxies(node_key) WHERE node_key != ''`); err != nil {
+		return fmt.Errorf("create idx_proxies_node_key: %w", err)
 	}
 	return nil
 }
@@ -170,7 +176,8 @@ func (s *Storage) rebuildProxiesWithoutAddressUnique() error {
 			dual_protocol   INTEGER NOT NULL DEFAULT 0,
 			ai_reachability TEXT NOT NULL DEFAULT '',
 			proxy_username  TEXT NOT NULL DEFAULT '',
-			proxy_password  TEXT NOT NULL DEFAULT ''
+			proxy_password  TEXT NOT NULL DEFAULT '',
+			node_key        TEXT NOT NULL DEFAULT ''
 		)`); err != nil {
 		return fmt.Errorf("create proxies_new: %w", err)
 	}
@@ -178,11 +185,11 @@ func (s *Storage) rebuildProxiesWithoutAddressUnique() error {
 		INSERT INTO proxies_new (
 			id, address, protocol, region, region_source, note, exit_ip, exit_location,
 			latency, quality_grade, use_count, success_count, fail_count, last_used,
-			last_check, created_at, status, user_paused, source, subscription_id, ipapiis_score, ipapi_flags, ipapi_flags_seen, starred, cf_blocked, dual_protocol, ai_reachability, proxy_username, proxy_password
+			last_check, created_at, status, user_paused, source, subscription_id, ipapiis_score, ipapi_flags, ipapi_flags_seen, starred, cf_blocked, dual_protocol, ai_reachability, proxy_username, proxy_password, node_key
 		)
 		SELECT id, address, protocol, region, region_source, note, exit_ip, exit_location,
 			latency, quality_grade, use_count, success_count, fail_count, last_used,
-			last_check, created_at, status, user_paused, source, subscription_id, ipapiis_score, ipapi_flags, ipapi_flags_seen, starred, cf_blocked, dual_protocol, ai_reachability, proxy_username, proxy_password
+			last_check, created_at, status, user_paused, source, subscription_id, ipapiis_score, ipapi_flags, ipapi_flags_seen, starred, cf_blocked, dual_protocol, ai_reachability, proxy_username, proxy_password, node_key
 		FROM proxies`); err != nil {
 		return fmt.Errorf("copy proxies_new: %w", err)
 	}
@@ -191,6 +198,10 @@ func (s *Storage) rebuildProxiesWithoutAddressUnique() error {
 	}
 	if _, err := tx.Exec(`ALTER TABLE proxies_new RENAME TO proxies`); err != nil {
 		return fmt.Errorf("rename proxies_new: %w", err)
+	}
+	// rebuild 会丢掉 migrateRequiredProxyColumns 里建的部分索引，必须补回。
+	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_proxies_node_key ON proxies(node_key) WHERE node_key != ''`); err != nil {
+		return fmt.Errorf("recreate idx_proxies_node_key after rebuild: %w", err)
 	}
 	return tx.Commit()
 }

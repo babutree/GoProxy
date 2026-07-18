@@ -166,6 +166,37 @@ func (s *Storage) GetProxyByID(id int64) (*Proxy, error) {
 	return nil, err
 }
 
+// GetProxyByNodeKey 按稳定节点身份键查询。node_key 为空返回 not found。
+// 多行同 key：显式歧义失败（与 GetProxyByAddress 一致，禁止静默替身）。
+func (s *Storage) GetProxyByNodeKey(nodeKey string) (*Proxy, error) {
+	nodeKey = strings.TrimSpace(nodeKey)
+	if nodeKey == "" {
+		return nil, fmt.Errorf("proxy node_key empty")
+	}
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM proxies WHERE node_key = ?`, nodeKey).Scan(&n); err != nil {
+		return nil, err
+	}
+	if n == 0 {
+		return nil, fmt.Errorf("proxy node_key %s not found", nodeKey)
+	}
+	if n > 1 {
+		return nil, fmt.Errorf("proxy node_key %s is ambiguous (%d rows)", nodeKey, n)
+	}
+	row := s.db.QueryRow(
+		`SELECT `+proxyColumns+` FROM proxies WHERE node_key = ?`,
+		nodeKey,
+	)
+	proxy, err := scanProxy(row)
+	if err == nil {
+		return proxy, nil
+	}
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("proxy node_key %s not found", nodeKey)
+	}
+	return nil, err
+}
+
 // IsSubscriptionPaused 报告父订阅是否暂停。id<=0 表示手工节点，无父订阅。
 func (s *Storage) IsSubscriptionPaused(id int64) (bool, error) {
 	if id <= 0 {

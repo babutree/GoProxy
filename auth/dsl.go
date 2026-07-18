@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"encoding/base64"
 	"fmt"
 	"strings"
 	"unicode"
@@ -9,7 +10,7 @@ import (
 const maxSessionLength = 64
 
 // ParsedUsername is the routing DSL carried in proxy auth username.
-// Syntax: <base>[-region-<cc>][-unlock-<token>][-session-<id>][-node-<addr>]
+// Syntax: <base>[-region-<cc>][-unlock-<token>][-session-<id>][-node-<addr|key-<nodeKey>>]
 // unlock token: gpt|openai|chatgpt|claude|gemini|grok|cf|all
 // all => openai+claude+grok+gemini+cf (AND).
 type ParsedUsername struct {
@@ -18,17 +19,16 @@ type ParsedUsername struct {
 	Session string
 	// Unlock is the normalized list of required unlock signals (openai/claude/grok/gemini/cf).
 	Unlock []string
-	// Node pins routing to a single node by its dial address (host:port), i.e. the
-	// gateway ENTRANCE address (the node's own identity), not the observed exit IP.
-	// When set, selection bypasses session affinity and picks exactly this node,
-	// provided it still passes availability/region/unlock/subscription checks.
-	// Chained/realm upstreams mean the final exit IP may still differ from this
-	// address and may drift; the gateway can only guarantee the entrance node.
+	// Node pins routing. Forms:
+	//   - host:port          当前拨号入口（兼容旧复制；隧道本地端口可能被重分配）
+	//   - key-<nodeKey>      稳定配置身份（推荐；刷新后端口变仍命中同一上游配置）
+	// Not an observed exit IP. Chained/realm upstreams may still change public exit.
 	Node string
 }
 
-// maxNodeLength caps the pinned node address token length (host:port).
+// maxNodeLength caps the pinned node token length (host:port or key-<nodeKey>).
 const maxNodeLength = 255
+const nodeKeyPrefix = "key-"
 
 func ParseUsername(raw string) (ParsedUsername, error) {
 	if raw == "" {
@@ -201,21 +201,60 @@ func splitValue(raw string) (string, string) {
 	return raw[:valueEnd], raw[valueEnd:]
 }
 
-// parseNode 解析 -node- 后的入口地址（host:port）。
-// 仅锁定网关拨号的入口节点身份；不校验/不保证最终出口 IP（链式/realm 上游可能不同或漂移）。
-// host:port 中含冒号，不能复用 splitValue（其按 DSL marker 切分即可，冒号不是 marker）。
+// parseNode 解析 -node- 后的锁定令牌：
+//   - host:port              兼容旧复制（本地端口可能被重分配）
+//   - key-<base64url(nodeKey)>  稳定身份（wire 形态不含 :，避免主机名里的 -session-/-region- 误切 DSL）
+//
+// 不校验/不保证最终出口 IP。
 func parseNode(raw string) (string, string, error) {
+	// key- 令牌：仅 base64url 字符，可用 splitValue 安全切开后续 -session- 等 marker。
+	if strings.HasPrefix(raw, nodeKeyPrefix) {
+		value, rest := splitValue(raw)
+		enc := value[len(nodeKeyPrefix):]
+		if enc == "" || !isNodeKeyWireToken(enc) {
+			return "", "", fmt.Errorf("node key must be non-empty base64url")
+		}
+		decoded, err := base64.RawURLEncoding.DecodeString(enc)
+		if err != nil || len(decoded) == 0 {
+			return "", "", fmt.Errorf("node key is not valid base64url")
+		}
+		// 规范化为 key-<decoded 原文> 供选路层统一 TrimPrefix("key-") 后查库。
+		return nodeKeyPrefix + string(decoded), rest, nil
+	}
 	value, rest := splitValue(raw)
 	if value == "" {
-		return "", "", fmt.Errorf("node address is empty")
+		return "", "", fmt.Errorf("node pin is empty")
 	}
 	if len(value) > maxNodeLength {
-		return "", "", fmt.Errorf("node address exceeds %d characters", maxNodeLength)
+		return "", "", fmt.Errorf("node pin exceeds %d characters", maxNodeLength)
 	}
 	if !isNodeAddress(value) {
-		return "", "", fmt.Errorf("node address must be host:port")
+		return "", "", fmt.Errorf("node pin must be host:port or key-<base64url>")
 	}
 	return value, rest, nil
+}
+
+// EncodeNodeKeyPin 将存储态 NodeKey 编码为 DSL 安全令牌（无 key- 前缀由调用方拼接）。
+func EncodeNodeKeyPin(nodeKey string) string {
+	nodeKey = strings.TrimSpace(nodeKey)
+	if nodeKey == "" {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString([]byte(nodeKey))
+}
+
+// isNodeKeyWireToken 校验 DSL 线上 key 令牌：仅 base64url 字符，避免与 -session- 等 marker 碰撞。
+func isNodeKeyWireToken(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if unicode.IsDigit(r) || isASCIIAlpha(r) || r == '-' || r == '_' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // isNodeAddress 校验 host:port 形态：必须恰有一个冒号，端口为数字，host 非空。

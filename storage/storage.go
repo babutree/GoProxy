@@ -48,6 +48,10 @@ type Proxy struct {
 	// 拨号/验证时注入到出站握手；空串表示无需认证。凭据绝不写入日志或错误串。
 	Username string `json:"username"`
 	Password string `json:"password"`
+	// NodeKey 稳定节点身份（custom.ParsedNode.NodeKey：type/server/port/raw 哈希）。
+	// 隧道节点 address 可能是 127.0.0.1:临时端口，刷新后会变；NodeKey 不变，供 -node-key- 锁定与 upsert 保 id。
+	// 直连节点可为空或与 address 对齐的派生键。空串表示旧数据/未写入。
+	NodeKey string `json:"node_key"`
 }
 
 // Subscription 订阅信息
@@ -125,7 +129,8 @@ func (s *Storage) initSchema() error {
 			dual_protocol  INTEGER NOT NULL DEFAULT 0,
 			ai_reachability TEXT NOT NULL DEFAULT '',
 			proxy_username TEXT NOT NULL DEFAULT '',
-			proxy_password TEXT NOT NULL DEFAULT ''
+			proxy_password TEXT NOT NULL DEFAULT '',
+			node_key       TEXT NOT NULL DEFAULT ''
 		)
 	`)
 	if err != nil {
