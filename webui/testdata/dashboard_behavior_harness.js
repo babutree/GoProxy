@@ -116,6 +116,7 @@ globalThis.__dashboardBehavior = {
   syncFilterToggle,
   copyProxyCred,
   encodeNodeKeyPin,
+  logWindowShift,
   proxyPagePrev,
   proxyPageNext,
   proxyPageSizeChange,
@@ -455,6 +456,15 @@ function runPaginationScenario() {
   return { scenario: 'pagination', assertions: 13 };
 }
 
+function runLogWindowScenario() {
+  equal(dashboard.logWindowShift(['a', 'b'], ['a', 'b']), 0, 'unchanged window has no shift');
+  equal(dashboard.logWindowShift(['a', 'b'], ['a', 'b', 'c']), 0, 'append-only window keeps indices');
+  equal(dashboard.logWindowShift(['dup', 'dup', 'tail'], ['dup', 'tail', 'new']), 1, 'largest overlap disambiguates duplicate text');
+  equal(dashboard.logWindowShift(['a', 'b', 'c'], ['c', 'd', 'e']), 2, 'rotated window maps the surviving suffix');
+  equal(dashboard.logWindowShift(['a'], ['z']), null, 'unrelated windows have no anchor mapping');
+  return { scenario: 'log_window', assertions: 5 };
+}
+
 async function runCopyScenario() {
   resetDOM();
   const nodeKey = 'vmess:东京-session-x.example:443:abc/+=?';
@@ -557,6 +567,7 @@ const scenarios = {
   pagination: runPaginationScenario,
   copy: runCopyScenario,
   nodekey_wire: runNodeKeyWireScenario,
+  log_window: runLogWindowScenario,
 };
 
 Promise.resolve(scenarios[scenario] ? scenarios[scenario]() : Promise.reject(new Error(`unknown scenario ${scenario}`)))

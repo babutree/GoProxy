@@ -435,6 +435,53 @@ func TestResolvePinnedNodeByStableKey(t *testing.T) {
 	}
 }
 
+func TestResolvePinnedNodeWithSessionRecordsMonitoringBinding(t *testing.T) {
+	store := fakeStore{proxies: []storage.Proxy{
+		{ID: 1, Address: "127.0.0.1:20009", Region: "us", Latency: 10, Status: "active", NodeKey: "trojan:up.example.com:443:deadbeef"},
+	}}
+	tests := []struct {
+		name string
+		node string
+	}{
+		{name: "stable node key", node: "key-trojan:up.example.com:443:deadbeef"},
+		{name: "legacy host port", node: "127.0.0.1:20009"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sessions := affinity.NewWithClock(10*time.Minute, time.Now)
+			proxy, err := Resolve(store, sessions, auth.ParsedUsername{
+				Node:    tt.node,
+				Session: "pin-monitor",
+			}, nil)
+			if err != nil {
+				t.Fatalf("Resolve() error = %v", err)
+			}
+			if proxy.ID != 1 {
+				t.Fatalf("Resolve() proxy ID = %d, want 1", proxy.ID)
+			}
+			binding, ok := sessions.Get("pin-monitor")
+			if !ok {
+				t.Fatal("pinned route with session did not create an affinity binding for session monitoring")
+			}
+			if binding.ProxyID != proxy.ID || binding.NodeAddress != proxy.Address || binding.Region != proxy.Region {
+				t.Fatalf("binding = %#v, want proxy id=%d address=%q region=%q",
+					binding, proxy.ID, proxy.Address, proxy.Region)
+			}
+			if list := sessions.List(); len(list) != 1 || list[0].SessionID != "pin-monitor" {
+				t.Fatalf("sessions.List() = %#v, want one pin-monitor binding", list)
+			}
+
+			missingRoute := auth.ParsedUsername{Node: "key-missing", Session: "failed-pin"}
+			if _, err := Resolve(store, sessions, missingRoute, nil); !errors.Is(err, ErrNoNode) {
+				t.Fatalf("Resolve(missing pin) error = %v, want ErrNoNode", err)
+			}
+			if _, ok := sessions.Get("failed-pin"); ok {
+				t.Fatal("failed pinned route created a monitoring binding")
+			}
+		})
+	}
+}
+
 // TestResolvePinnedNodeMissingReturnsErrNoNode: 锁定地址不存在必须显式失败，不回退选路。
 func TestResolvePinnedNodeMissingReturnsErrNoNode(t *testing.T) {
 	store := fakeStore{proxies: []storage.Proxy{

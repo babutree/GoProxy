@@ -20,8 +20,10 @@ import (
 	"time"
 
 	"github.com/babutree/GeoProxy/affinity"
+	"github.com/babutree/GeoProxy/auth"
 	"github.com/babutree/GeoProxy/config"
 	"github.com/babutree/GeoProxy/custom"
+	"github.com/babutree/GeoProxy/selector"
 	"github.com/babutree/GeoProxy/storage"
 	"github.com/babutree/GeoProxy/validator"
 )
@@ -986,6 +988,40 @@ func TestSessionAPIReturnsActiveBindings(t *testing.T) {
 	}
 }
 
+func TestSessionAPISortsByExpiryDescendingWithStableTieBreak(t *testing.T) {
+	server := newTestServer(t)
+	base := time.Date(2026, 7, 22, 0, 0, 0, 0, time.UTC)
+	now := base
+	server.affinity = affinity.NewWithClock(10*time.Minute, func() time.Time { return now })
+	for i := 0; i < 8; i++ {
+		now = base.Add(time.Duration(i) * time.Minute)
+		server.affinity.SetProxy(fmt.Sprintf("session-%d", i), int64(i+1), fmt.Sprintf("203.0.113.%d:8080", i+1), "jp")
+	}
+	now = base.Add(8 * time.Minute)
+	server.affinity.SetProxy("same-b", 20, "203.0.113.20:8080", "jp")
+	server.affinity.SetProxy("same-a", 21, "203.0.113.21:8080", "jp")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
+	req.AddCookie(&http.Cookie{Name: "session", Value: newSession()})
+	rec := httptest.NewRecorder()
+	server.routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var rows []sessionRow
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatalf("decode sessions: %v", err)
+	}
+	got := make([]string, len(rows))
+	for i := range rows {
+		got[i] = rows[i].SessionID
+	}
+	want := []string{"same-a", "same-b", "session-7", "session-6", "session-5", "session-4", "session-3", "session-2", "session-1", "session-0"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("session order = %v, want expiry descending with stable tie-break %v", got, want)
+	}
+}
+
 // TestSessionAPIPrefersExitIPOverLocalMixedBind 隧道会话绑定地址常为 127.0.0.1:mixed，
 // 展示出口节点必须优先真实 exit_ip，不能把本机 mixed 当地址出口。
 func TestSessionAPIPrefersExitIPOverLocalMixedBind(t *testing.T) {
@@ -1030,6 +1066,59 @@ func TestSessionAPIPrefersExitIPOverLocalMixedBind(t *testing.T) {
 	}
 	if rows[0].Source != storage.SourceManual {
 		t.Fatalf("source = %q, want manual", rows[0].Source)
+	}
+}
+
+func TestNodeKeyPinnedSessionAppearsInSessionAPI(t *testing.T) {
+	server := newTestServer(t)
+	const (
+		address = "127.0.0.1:32001"
+		nodeKey = "trojan:session-monitor.example:443:stable"
+	)
+	if err := server.storage.AddManualProxyWithNodeKey(address, "socks5", "gb", "", nodeKey); err != nil {
+		t.Fatalf("AddManualProxyWithNodeKey() error = %v", err)
+	}
+	proxy, err := server.storage.GetProxyByAddress(address)
+	if err != nil {
+		t.Fatalf("GetProxyByAddress() error = %v", err)
+	}
+	if err := server.storage.UpdateProxyExitInfo(proxy.ID, "81.90.21.8", "GB", 80, 0, "", true, 0, ""); err != nil {
+		t.Fatalf("UpdateProxyExitInfo() error = %v", err)
+	}
+	if err := server.storage.EnableProxyByID(proxy.ID); err != nil {
+		t.Fatalf("EnableProxyByID() error = %v", err)
+	}
+
+	route, err := auth.ParseUsername("user-node-key-" + auth.EncodeNodeKeyPin(nodeKey) + "-session-node-key-api")
+	if err != nil {
+		t.Fatalf("ParseUsername() error = %v", err)
+	}
+	picked, err := selector.Resolve(server.storage, server.affinity, route, nil)
+	if err != nil {
+		t.Fatalf("selector.Resolve() error = %v", err)
+	}
+	if picked.ID != proxy.ID {
+		t.Fatalf("picked ID = %d, want %d", picked.ID, proxy.ID)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
+	req.AddCookie(&http.Cookie{Name: "session", Value: newSession()})
+	rec := httptest.NewRecorder()
+	server.routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var rows []sessionRow
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatalf("decode sessions: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("sessions = %#v, want one row", rows)
+	}
+	row := rows[0]
+	if row.SessionID != "node-key-api" || row.ProxyID != proxy.ID ||
+		row.BindAddress != address || row.ExitIP != "81.90.21.8" || row.Node != "81.90.21.8" {
+		t.Fatalf("session row = %#v, want pinned proxy with stored exit snapshot", row)
 	}
 }
 

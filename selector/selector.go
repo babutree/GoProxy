@@ -67,12 +67,21 @@ func PickUnlock(store Store, region string, excludes []int64, unlock []string) (
 }
 
 func Resolve(store Store, sessions *affinity.Store, route auth.ParsedUsername, excludes []int64) (*storage.Proxy, error) {
-	// -node- 锁定优先：直接命中指定入口节点，绕过地域选路与会话亲和。
+	// -node- 锁定优先：直接命中指定入口节点，绕过地域选路与会话亲和选点。
+	// 若同时携带 session，仍记录实际绑定供会话监控与占用统计使用；
+	// 后续请求继续以 node pin 为准，不由该绑定改变锁定结果。
 	// 仍须通过可用性/地域/unlock/父订阅校验；被 excludes 命中或校验失败则返回 ErrNoNode。
 	// 注意：锁定的是网关拨号的入口地址（节点身份），最终出口 IP 由该节点上游链路决定，
 	// 链式/realm 转发时可能与入口不同或漂移，网关无法感知或保证。
 	if route.Node != "" {
-		return resolvePinnedNode(store, route, excludes)
+		proxy, err := resolvePinnedNode(store, route, excludes)
+		if err != nil {
+			return nil, err
+		}
+		if route.Session != "" && sessions != nil {
+			sessions.SetProxy(route.Session, proxy.ID, proxy.Address, proxy.Region)
+		}
+		return proxy, nil
 	}
 	if route.Session == "" {
 		return PickUnlock(store, route.Region, excludes, route.Unlock)

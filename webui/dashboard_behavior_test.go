@@ -36,7 +36,7 @@ type dashboardNodeKeyWireVector struct {
 
 func TestDashboardProductionBundleBehavior(t *testing.T) {
 	bundle := dashboardBehaviorBundle(t)
-	for _, scenario := range []string{"protocol", "filters", "filter_toggle", "ai_badges", "pagination", "copy"} {
+	for _, scenario := range []string{"protocol", "filters", "filter_toggle", "ai_badges", "pagination", "copy", "log_window"} {
 		t.Run(scenario, func(t *testing.T) {
 			result := requireDashboardBehaviorScenario(t, bundle, scenario)
 			if result.Scenario != scenario {

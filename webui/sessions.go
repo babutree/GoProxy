@@ -3,6 +3,7 @@ package webui
 import (
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/babutree/GeoProxy/storage"
@@ -62,6 +63,14 @@ func (s *Server) apiSessions(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	bindings := s.affinity.List()
+	// 所有绑定共享同一 TTL，因此按 LastActive 倒序即按到期时刻倒序。
+	// 相同时按 session ID 排序，避免 Go map 迭代顺序使自动刷新后的列表跳动。
+	sort.Slice(bindings, func(i, j int) bool {
+		if bindings[i].LastActive.Equal(bindings[j].LastActive) {
+			return bindings[i].SessionID < bindings[j].SessionID
+		}
+		return bindings[i].LastActive.After(bindings[j].LastActive)
+	})
 	// 订阅名映射（来源展示）；失败不阻断会话列表。
 	subNameByID := map[int64]string{}
 	if s.storage != nil {
