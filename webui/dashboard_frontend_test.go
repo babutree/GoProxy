@@ -137,14 +137,40 @@ func TestDashboardStarCopyAndCFColumns(t *testing.T) {
 	}
 }
 
+func TestDashboardLogsAutoScrollFollowsWhenVisible(t *testing.T) {
+	checks := []string{
+		"function isLogsTabVisible(){const page=document.getElementById('page-logs');return !!(page&&page.classList.contains('active'))}",
+		"function stickLogsToBottom(box){",
+		"requestAnimationFrame(function(){apply();requestAnimationFrame(apply)})",
+		"if(follow){if(isLogsTabVisible())stickLogsToBottom(box);return}",
+		"if(name==='logs'){runAsync('日志刷新失败',async()=>{await loadLogs();",
+		"if(auto&&auto.checked)stickLogsToBottom(document.getElementById('logs-box'))",
+		"auto.addEventListener('change',function(){if(this.checked)stickLogsToBottom(document.getElementById('logs-box'))})",
+	}
+	for _, check := range checks {
+		t.Run(check, func(t *testing.T) {
+			if !strings.Contains(dashboardBundle, check) {
+				t.Fatalf("dashboardHTML missing logs autoscroll invariant %q", check)
+			}
+		})
+	}
+	// 不得再使用「仅一次赋值 scrollTop=scrollHeight 且不检查可见性」的旧贴底。
+	if strings.Contains(dashboardBundle, "if(follow){box.scrollTop=box.scrollHeight;return}") {
+		t.Fatal("dashboardHTML loadLogs still uses layout-unsafe single scrollTop assignment for autoscroll")
+	}
+}
+
 func TestDashboardNodeStateAndRegionDistributionUseAvailableKnownRegions(t *testing.T) {
 	checks := []string{
 		// BUG-50: isAvailable 必须排除 user_paused，被暂停节点不算可用。
 		"function isUserPaused(p){return !!(p&&(p.user_paused===true||Number(p.user_paused)===1))}",
-		"function isAvailable(proxy){return !isUserPaused(proxy)&&(proxy.status==='active'||proxy.status==='degraded')&&Number(proxy.fail_count||0)<3}",
+		// 父订阅 paused/孤儿节点也不得计入可用（与 CountAll/选路 scope 对齐）。
+		"function isParentSubscriptionSelectable(p){if(!p||p.source!=='subscription')return true;return String(p.subscription_status||'').trim().toLowerCase()==='active'}",
+		"function isParentSubscriptionPaused(p){return !!(p&&p.source==='subscription'&&String(p.subscription_status||'').trim().toLowerCase()==='paused')}",
+		"function isAvailable(proxy){return isParentSubscriptionSelectable(proxy)&&!isUserPaused(proxy)&&(proxy.status==='active'||proxy.status==='degraded')&&Number(proxy.fail_count||0)<3}",
 		// BUG-50: nodeState 主判据改为 user_paused（存储层新口径 status 仍为 active）。
 		"function hasLastCheck(p){",
-		"function nodeState(p){if(isUserPaused(p)||p.status==='paused')return 'paused';if(isAvailable(p))return 'ok';if(Number(p.fail_count||0)>=3)return 'failed';if(p.status==='disabled')return hasLastCheck(p)?'failed':'pending';return 'pending'}",
+		"function nodeState(p){if(isUserPaused(p)||isParentSubscriptionPaused(p)||p.status==='paused')return 'paused';if(p&&p.source==='subscription'&&!isParentSubscriptionSelectable(p))return 'failed';if(isAvailable(p))return 'ok';if(Number(p.fail_count||0)>=3)return 'failed';if(p.status==='disabled')return hasLastCheck(p)?'failed':'pending';return 'pending'}",
 		// BUG-51: allRegions/地域分布均经 isAvailable 过滤，因此不再计入 user_paused 节点。
 		"allRegions=Array.from(new Set(allProxies.filter(p=>isAvailable(p)&&isKnownRegion(p)).map(regionOf))).sort()",
 		"allProxies.filter(p=>isAvailable(p)&&isKnownRegion(p)).forEach",
@@ -162,6 +188,9 @@ func TestDashboardNodeStateAndRegionDistributionUseAvailableKnownRegions(t *test
 	// 回归防护：isAvailable 必须真正读取 user_paused，不得退回旧口径（只看 status/fail_count）。
 	if strings.Contains(dashboardBundle, "function isAvailable(proxy){return (proxy.status==='active'||proxy.status==='degraded')&&Number(proxy.fail_count||0)<3}") {
 		t.Fatal("dashboardHTML isAvailable reverted to legacy form that ignores user_paused (BUG-50)")
+	}
+	if strings.Contains(dashboardBundle, "function isAvailable(proxy){return !isUserPaused(proxy)&&(proxy.status==='active'||proxy.status==='degraded')&&Number(proxy.fail_count||0)<3}") {
+		t.Fatal("dashboardHTML isAvailable ignores parent subscription pause (must match CountAll scope)")
 	}
 	// 回归防护：nodeState 不得只靠 status==='paused' 判定暂停（新数据 status 恒为 active，永不命中）。
 	if strings.Contains(dashboardBundle, "function nodeState(p){if(p.status==='paused')return 'paused';") {

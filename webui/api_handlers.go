@@ -86,19 +86,31 @@ func (s *Server) apiProxies(w http.ResponseWriter, r *http.Request) {
 		nameByID[sub.ID] = sub.Name
 	}
 
+	// 父订阅状态：统计/选路会排除 paused 与孤儿订阅节点，但管理列表仍返回全部行。
+	// 前端必须拿到 subscription_status 才能与顶部「上游节点」可用数对齐。
+	statusByID := map[int64]string{}
+	for _, sub := range subs {
+		statusByID[sub.ID] = sub.Status
+	}
+
 	type proxyView struct {
 		storage.Proxy
-		SubscriptionName string `json:"subscription_name"`
+		SubscriptionName   string `json:"subscription_name"`
+		SubscriptionStatus string `json:"subscription_status,omitempty"`
 	}
 	views := make([]proxyView, 0, len(proxies))
 	for _, p := range proxies {
 		name := ""
+		subStatus := ""
 		if p.Source == storage.SourceSubscription {
 			if n, ok := nameByID[p.SubscriptionID]; ok {
 				name = n
 			}
+			if st, ok := statusByID[p.SubscriptionID]; ok {
+				subStatus = st
+			}
 		}
-		views = append(views, proxyView{Proxy: p, SubscriptionName: name})
+		views = append(views, proxyView{Proxy: p, SubscriptionName: name, SubscriptionStatus: subStatus})
 	}
 	jsonOK(w, views)
 }
@@ -344,6 +356,7 @@ func (s *Server) apiRefreshLatency(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiLogs(w http.ResponseWriter, r *http.Request) {
-	lines := logger.GetLines(100)
+	// 与 logger 环形缓冲容量对齐，避免自动滚动只能看到末尾 100 行。
+	lines := logger.GetLines(500)
 	jsonOK(w, map[string]interface{}{"lines": lines})
 }

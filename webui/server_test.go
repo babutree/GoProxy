@@ -1560,6 +1560,72 @@ func TestSubscriptionsAPIReportsPausedCount(t *testing.T) {
 	}
 }
 
+// TestProxiesAPIReportsParentSubscriptionStatus 暂停父订阅后节点行仍返回，
+// 但必须带 subscription_status=paused，供前端 isAvailable 与 /api/stats 对齐。
+func TestProxiesAPIReportsParentSubscriptionStatus(t *testing.T) {
+	server := newTestServer(t)
+	subID, err := server.storage.AddSubscription("parent-scope", "https://example.test/parent-scope", "", "auto", 60, "")
+	if err != nil {
+		t.Fatalf("AddSubscription() error = %v", err)
+	}
+	if err := server.storage.AddProxyWithSource("203.0.113.50:8080", "http", storage.SourceSubscription, subID); err != nil {
+		t.Fatalf("AddProxyWithSource() error = %v", err)
+	}
+	if err := server.storage.AddProxy("203.0.113.51:8080", "http"); err != nil {
+		t.Fatalf("AddProxy(manual) error = %v", err)
+	}
+	if err := server.storage.PauseSubscription(subID); err != nil {
+		t.Fatalf("PauseSubscription() error = %v", err)
+	}
+
+	total, err := server.storage.CountAll()
+	if err != nil {
+		t.Fatalf("CountAll() error = %v", err)
+	}
+	if total != 1 {
+		t.Fatalf("CountAll() = %d, want 1 (only manual remains selectable)", total)
+	}
+
+	req := authenticatedJSONRequest(http.MethodGet, "/api/proxies", "")
+	rec := httptest.NewRecorder()
+	server.routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var rows []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatalf("decode /api/proxies: %v body=%s", err, rec.Body.String())
+	}
+	if len(rows) != 2 {
+		t.Fatalf("proxy rows = %d, want 2 (admin list keeps paused-subscription rows)", len(rows))
+	}
+
+	var sawPausedSub, sawManual bool
+	for _, row := range rows {
+		source, _ := row["source"].(string)
+		status, _ := row["subscription_status"].(string)
+		switch source {
+		case storage.SourceSubscription:
+			sawPausedSub = true
+			if status != "paused" {
+				t.Fatalf("subscription row subscription_status = %q, want paused; row=%#v", status, row)
+			}
+			if st, _ := row["status"].(string); st != "active" {
+				t.Fatalf("paused-parent proxy status = %q, want still active row color", st)
+			}
+		case storage.SourceManual, "":
+			sawManual = true
+			if status != "" {
+				t.Fatalf("manual row should omit parent status, got %q", status)
+			}
+		}
+	}
+	if !sawPausedSub || !sawManual {
+		t.Fatalf("missing expected rows: pausedSub=%v manual=%v body=%s", sawPausedSub, sawManual, rec.Body.String())
+	}
+}
+
 // TestLoginClientKeyTrustsOnlyLoopbackProxyBoundary 覆盖 BUGFIX-042：
 // 仅 loopback 直接对端可提供 XFF，并从右向左取最近的合法 IP；
 // 非可信 IPv4/IPv6 直接对端一律回退到 RemoteAddr 的 host。
