@@ -89,7 +89,7 @@ const sandbox = {
   },
   window: { addEventListener() {} },
   confirm() { return confirmResult; },
-  requestAnimationFrame() { return 1; },
+  requestAnimationFrame(cb) { if (typeof cb === 'function') cb(); return 1; },
   setTimeout() { return 1; },
   clearTimeout() {},
   setInterval() { return 1; },
@@ -198,6 +198,8 @@ function resetDOM() {
   [
     'proxy-rows', 'proxy-page-info', 'proxy-page-num', 'proxy-page-prev',
     'proxy-page-next', 'proxy-page-size', 'proxy-select-all', 'toast',
+    'confirm-modal', 'confirm-modal-msg', 'confirm-modal-ok', 'confirm-modal-cancel',
+    'protocol-pick-modal', 'protocol-pick-socks', 'protocol-pick-http', 'protocol-pick-cancel',
   ].forEach(ensureElement);
   ensureElement('proxy-page-size').value = String(dashboard.pageSize());
 }
@@ -497,16 +499,17 @@ async function runCopyScenario() {
   });
   dashboard.setPublicIP('203.0.113.7');
 
-  confirmResult = true;
+  // mixed 节点通过应用内协议选择，不再用浏览器 confirm 的确定/取消冒充协议。
+  const originalPick = sandbox.showProtocolPick;
+  sandbox.showProtocolPick = async function () { return 'socks5'; };
   clipboardWrites.length = 0;
-  dashboard.copyProxyCred(1);
-  await Promise.resolve();
+  await dashboard.copyProxyCred(1);
   const socksURLRaw = lastClipboardWrite();
   const socksURL = new URL(socksURLRaw);
   const expectedPin = Buffer.from(nodeKey, 'utf8').toString('base64')
     .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   const gatewayUser = decodeURIComponent(socksURL.username);
-  equal(socksURL.protocol, 'socks5:', 'dual confirm selects SOCKS5');
+  equal(socksURL.protocol, 'socks5:', 'protocol pick socks5 copies SOCKS5 URL');
   equal(socksURL.hostname, '203.0.113.7', 'gateway copy uses public host');
   equal(socksURL.port, '7801', 'SOCKS5 copy uses configured gateway port');
   equal(gatewayUser, `edge-node-key-${expectedPin}`, 'gateway copy uses stable Base64URL node key');
@@ -514,12 +517,17 @@ async function runCopyScenario() {
   equal(/[+/=]/.test(expectedPin), false, 'node key pin is unpadded Base64URL');
   equal(socksURLRaw.includes(password), false, 'raw URL does not contain unescaped password');
 
-  confirmResult = false;
-  dashboard.copyProxyCred(1);
-  await Promise.resolve();
+  sandbox.showProtocolPick = async function () { return 'http'; };
+  await dashboard.copyProxyCred(1);
   const httpURL = new URL(lastClipboardWrite());
-  equal(httpURL.protocol, 'http:', 'dual cancel selects HTTP');
+  equal(httpURL.protocol, 'http:', 'protocol pick http copies HTTP URL');
   equal(httpURL.port, '7802', 'HTTP copy uses configured gateway port');
+
+  const writesBeforeCancel = clipboardWrites.length;
+  sandbox.showProtocolPick = async function () { return ''; };
+  await dashboard.copyProxyCred(1);
+  equal(clipboardWrites.length, writesBeforeCancel, 'protocol pick cancel does not write clipboard');
+  sandbox.showProtocolPick = originalPick;
 
   dashboard.copyProxyCred(2);
   await Promise.resolve();
@@ -535,16 +543,14 @@ async function runCopyScenario() {
     socks5_port: ':7801',
     http_port: ':7802',
   });
-  confirmResult = true;
-  dashboard.copyProxyCred(1);
-  await Promise.resolve();
+  sandbox.showProtocolPick = async function () { return 'socks5'; };
+  await dashboard.copyProxyCred(1);
   const placeholderURL = new URL(lastClipboardWrite());
   equal(decodeURIComponent(placeholderURL.password), 'PASSWORD', 'missing password uses explicit placeholder');
   equal(ensureElement('toast').textContent.includes(password), false, 'toast does not expose gateway password');
 
   const writesBeforeLegacyCopy = clipboardWrites.length;
-  dashboard.copyProxyCred(3);
-  await Promise.resolve();
+  await dashboard.copyProxyCred(3);
   equal(clipboardWrites.length, writesBeforeLegacyCopy, 'gateway without NodeKey does not write an unstable address pin');
   equal(
     ensureElement('toast').textContent,
@@ -556,7 +562,7 @@ async function runCopyScenario() {
     false,
     'clipboard never receives the temporary loopback address pin',
   );
-  return { scenario: 'copy', assertions: 18, gatewayUser, nodeKey };
+  return { scenario: 'copy', assertions: 19, gatewayUser, nodeKey };
 }
 
 const scenarios = {

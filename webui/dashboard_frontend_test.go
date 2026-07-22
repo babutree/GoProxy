@@ -170,7 +170,10 @@ func TestDashboardNodeStateAndRegionDistributionUseAvailableKnownRegions(t *test
 		"function isAvailable(proxy){return isParentSubscriptionSelectable(proxy)&&!isUserPaused(proxy)&&(proxy.status==='active'||proxy.status==='degraded')&&Number(proxy.fail_count||0)<3}",
 		// BUG-50: nodeState 主判据改为 user_paused（存储层新口径 status 仍为 active）。
 		"function hasLastCheck(p){",
-		"function nodeState(p){if(isUserPaused(p)||isParentSubscriptionPaused(p)||p.status==='paused')return 'paused';if(p&&p.source==='subscription'&&!isParentSubscriptionSelectable(p))return 'failed';if(isAvailable(p))return 'ok';if(Number(p.fail_count||0)>=3)return 'failed';if(p.status==='disabled')return hasLastCheck(p)?'failed':'pending';return 'pending'}",
+		"function nodeState(p){if(isParentSubscriptionPaused(p))return 'sub_paused';if(p&&p.source==='subscription'&&!isParentSubscriptionSelectable(p))return 'failed';if(isUserPaused(p)||p.status==='paused')return 'paused';if(isAvailable(p))return 'ok';if(Number(p.fail_count||0)>=3)return 'failed';if(p.status==='disabled')return hasLastCheck(p)?'failed':'pending';return 'pending'}",
+		"case 'sub_paused':return '<span class=\"badge warn\">订阅已暂停</span>'",
+		"if(st==='sub_paused'){toggleBtn='<button class=\"mini\" disabled title=\"请先在「订阅」页启用该订阅\">订阅已暂停</button>'}",
+		"const showRegion=isKnownRegion(p)",
 		// BUG-51: allRegions/地域分布均经 isAvailable 过滤，因此不再计入 user_paused 节点。
 		"allRegions=Array.from(new Set(allProxies.filter(p=>isAvailable(p)&&isKnownRegion(p)).map(regionOf))).sort()",
 		"allProxies.filter(p=>isAvailable(p)&&isKnownRegion(p)).forEach",
@@ -517,17 +520,25 @@ func TestDashboardCopyProxyCredPrefersStableNodeKey(t *testing.T) {
 // TestDashboardCopyProxyCredBuildsFullURL 验证 copyProxyCred：
 // - 网关节点：协议://用户名DSL:密码@网关入口（密码可为空占位 PASSWORD）
 // - 直连节点（手工 HTTP/SOCKS 等非 tunnel）：协议://节点自身 IP:端口，绝不拼网关密码
-// mixed 网关节点 confirm 选 socks5/http；成功 toast 不回显含真实密码的完整 URL。
+// mixed 网关节点用应用内协议选择弹窗；成功 toast 不回显含真实密码的完整 URL。
 func TestDashboardCopyProxyCredBuildsFullURL(t *testing.T) {
 	checks := []string{
 		// 直连 vs 网关分支：dual_protocol 或回环本地地址才走网关 DSL。
 		"function isGatewayNode(p){",
 		"function isDirectNode(p){return !isGatewayNode(p)}",
+		// mixed 协议选择必须走应用内弹窗，禁止浏览器 confirm 冒充协议。
+		"function showProtocolPick()",
+		"id=\"protocol-pick-modal\"",
+		"选择复制协议",
+		"复制 SOCKS5",
+		"复制 HTTP",
+		"async function copyProxyCred(id)",
+		"scheme=await showProtocolPick()",
 		// 直连复制：有 username 则拼 scheme://user:pass@addr，否则 scheme://addr（无 userinfo）。
 		"if(isDirectNode(p)){",
 		"const u=String(p.username||'')",
 		"const url=u?(scheme+'://'+encodeProxyUserInfo(u)+':'+encodeProxyUserInfo(String(p.password||''))+'@'+addr):(scheme+'://'+addr)",
-		"navigator.clipboard.writeText(url).then(()=>showToast('已复制直连地址'))",
+		"showToast('已复制直连地址')",
 		// 网关复制：仍用 DSL + 密码（空则 PASSWORD 占位）。
 		"const rawPass=(configCache&&configCache.proxy_auth_password)?configCache.proxy_auth_password:''",
 		"const pass=rawPass||'PASSWORD'",
@@ -535,7 +546,7 @@ func TestDashboardCopyProxyCredBuildsFullURL(t *testing.T) {
 		"function encodeProxyUserInfo(value){return encodeURIComponent(String(value||'')).replace(/[!'()*]/g,c=>'%'+c.charCodeAt(0).toString(16).toUpperCase())}",
 		"已复制，请将 PASSWORD 替换为真实密码",
 		"锁定节点身份，非出口IP",
-		"navigator.clipboard.writeText(url).then(()=>showToast(okMsg))",
+		"showToast(okMsg)",
 	}
 	for _, check := range checks {
 		t.Run(check, func(t *testing.T) {
@@ -557,6 +568,13 @@ func TestDashboardCopyProxyCredBuildsFullURL(t *testing.T) {
 	}
 	if strings.Contains(dashboardBundle, "showToast(url)") {
 		t.Fatal("dashboardHTML copyProxyCred success toast must not echo url variable with password")
+	}
+	// 回归：禁止用浏览器 confirm 的确定/取消冒充 SOCKS5/HTTP 选择。
+	if strings.Contains(dashboardBundle, "confirm('确定复制 SOCKS5") || strings.Contains(dashboardBundle, "confirm(\"确定复制 SOCKS5") {
+		t.Fatal("copyProxyCred still uses browser confirm for protocol selection")
+	}
+	if strings.Contains(dashboardBundle, "取消则复制 HTTP") {
+		t.Fatal("copyProxyCred still uses cancel-as-HTTP browser confirm wording")
 	}
 }
 
@@ -933,6 +951,13 @@ func TestDashboardRegionDistributionRichPanel(t *testing.T) {
 		"ca:'加拿大'",
 		"us:'美国'",
 		"nl:'荷兰'",
+		// 波罗的海等高频码不得回退显示裸 ISO 代码。
+		"lv:'拉脱维亚'",
+		"ee:'爱沙尼亚'",
+		"lt:'立陶宛'",
+		"sk:'斯洛伐克'",
+		"hr:'克罗地亚'",
+		"rs:'塞尔维亚'",
 		"margin-top:40px",
 		"平均延迟 ",
 		"品质结构 · 平均延迟 · 会话",
@@ -948,6 +973,67 @@ func TestDashboardRegionDistributionRichPanel(t *testing.T) {
 	}
 	if strings.Contains(dashboardBundle, "均延 ") {
 		t.Fatal("region panel still uses nonstandard label 均延; want 平均延迟")
+	}
+}
+
+// TestDashboardRegionZHCoversCommonExitCodes 锁定代理节点池常见出口码的中文名，
+// 避免仅靠用户报告才补 LV/EE 这类缺口。
+func TestDashboardRegionZHCoversCommonExitCodes(t *testing.T) {
+	start := strings.Index(dashboardBundle, "const REGION_ZH={")
+	if start < 0 {
+		t.Fatal("REGION_ZH map missing from dashboard bundle")
+	}
+	end := strings.Index(dashboardBundle[start:], "};")
+	if end < 0 {
+		t.Fatal("REGION_ZH map is not closed")
+	}
+	body := dashboardBundle[start : start+end]
+
+	// 用户已报 / 欧洲节点池高频且原先缺失的码。
+	required := map[string]string{
+		"lv": "拉脱维亚",
+		"ee": "爱沙尼亚",
+		"lt": "立陶宛",
+		"sk": "斯洛伐克",
+		"si": "斯洛文尼亚",
+		"hr": "克罗地亚",
+		"rs": "塞尔维亚",
+		"ba": "波黑",
+		"mk": "北马其顿",
+		"al": "阿尔巴尼亚",
+		"md": "摩尔多瓦",
+		"by": "白俄罗斯",
+		"is": "冰岛",
+		"mt": "马耳他",
+		"cy": "塞浦路斯",
+		"ge": "格鲁吉亚",
+		"am": "亚美尼亚",
+		"az": "阿塞拜疆",
+		"uz": "乌兹别克斯坦",
+		"lk": "斯里兰卡",
+		"kh": "柬埔寨",
+		"mm": "缅甸",
+		"ma": "摩洛哥",
+		"tn": "突尼斯",
+		"gh": "加纳",
+		"pa": "巴拿马",
+		"cr": "哥斯达黎加",
+		"do": "多米尼加",
+		"uy": "乌拉圭",
+	}
+	for code, name := range required {
+		token := code + ":'" + name + "'"
+		if !strings.Contains(body, token) {
+			t.Fatalf("REGION_ZH missing %s → %s", code, name)
+		}
+	}
+
+	// 未知码仍须回退大写 ISO，避免把坏数据硬编码成“未知国家名”。
+	if !strings.Contains(dashboardBundle, "return REGION_ZH[c]||c.toUpperCase()") {
+		t.Fatal("regionDisplayName must fall back to uppercase ISO for unknown codes")
+	}
+	if !strings.Contains(dashboardBundle, "if(!c||c==='unknown')return '未知'") {
+		t.Fatal("regionDisplayName must map empty/unknown to 未知")
 	}
 }
 
